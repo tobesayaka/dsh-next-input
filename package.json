@@ -1,0 +1,57 @@
+{
+  "name": "dsh-next-input",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Predicts your next composer message after an answer and offers it as Tab-to-accept ghost text.",
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.2.2-rc.1"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "composer",
+    "prediction",
+    "ghost-text"
+  ],
+  "icon": "./assets/icon.svg",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./assets/icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/index.js",
+    "src/client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "assets/icon.svg",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "CHANGELOG.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/client.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

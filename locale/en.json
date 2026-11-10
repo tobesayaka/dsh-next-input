@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "Next input prediction",
+    "description": "Predicts your next message after an answer and shows it as ghost text; press Tab to accept."
+  },
+  "tab": "Tab",
+  "hint": "Press Tab to accept this prediction"
+}
