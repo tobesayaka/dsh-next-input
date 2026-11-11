@@ -17,6 +17,9 @@ in the empty composer, and lets the user accept it with **Tab**.
 - Shows the prediction only while the composer is empty and the Session is idle.
 - `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
   it.
+- Follows the DSH interface language: the ghost hint, the announcements, and
+  the Settings page switch between Chinese and English (with the built-in
+  English copy as the fallback when the locale service is unavailable).
 - Never writes the conversation into a prediction cache, Session log, or
   `localStorage`.
 
@@ -91,6 +94,10 @@ under *Built-in plugins* any more. It provides:
 - Usage counters come from the provider's `usage` chunk for each prediction and
   live in Host process memory (a DSH restart clears them); `GET
   /api/next-input.usage` returns the same numbers.
+- The page and the in-composer copy follow the DSH interface language
+  (Settings → General → Language). The plugin requires the `locale` service and
+  registers its Chinese and English dictionaries as one namespace, and the
+  settings-section labels are re-read whenever the interface language changes.
 
 ## How it works
 
@@ -206,7 +213,7 @@ plugin row or turn off `predictOnActivate` to stop the extra calls.
 ## Development
 
 ```bash
-npm test        # 30 tests
+npm test        # 31 tests
 npm run check   # node --check for host and client halves
 ```
 

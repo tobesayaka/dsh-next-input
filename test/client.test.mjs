@@ -312,3 +312,86 @@ test('reads the Session model selection from the modelSelection projection', () 
   assert.equal(client.__test.readSelection({ binding() { throw new Error('gone'); } }, 'session-1'), null);
   assert.equal(client.__test.readSelection(undefined, 'session-1'), null);
 });
+
+test('the copy and the settings labels follow the DSH locale service', () => {
+  const client = loadClient(makeStorage());
+  assert.deepEqual(Array.from(client.inject), ['slots', 'locale']);
+
+  const dicts = new Map();
+  let revision = 0;
+  // Shaped like `dsh-client-locale`'s LocaleRuntime: one namespace map, a
+  // second register of the same language throws, `bind(ns)(key)` falls back to
+  // English and then to the key.
+  const service = {
+    active: 'zh',
+    bind(ns) {
+      return (key) => {
+        const table = dicts.get(ns) || {};
+        const text = table[this.active] && table[this.active][key];
+        if (text !== undefined) return text;
+        const english = table.en && table.en[key];
+        return english !== undefined ? english : key;
+      };
+    },
+    getSnapshot() {
+      return { active: this.active, revision };
+    },
+    subscribe() {
+      return () => {};
+    },
+    register(ns, languages) {
+      if (dicts.has(ns)) throw new Error('locale namespace "' + ns + '" already registered');
+      dicts.set(ns, languages);
+      revision += 1;
+      return () => dicts.delete(ns);
+    },
+  };
+  let available = false;
+  const registrations = [];
+  const ctx = {
+    get(name) {
+      if (name === 'locale') return available ? service : undefined;
+      return undefined;
+    },
+    effect(fn) {
+      fn();
+    },
+    slots: {
+      inject(_key, callback) {
+        callback();
+      },
+      register(options) {
+        registrations.push(options);
+      },
+    },
+  };
+  client.apply(ctx);
+
+  // No service yet: the section label still resolves, to the built-in English.
+  const section = registrations.find((entry) => entry.name === 'settings.section');
+  assert.equal(section.label(), 'Next input');
+  assert.equal(dicts.size, 0);
+
+  // The service is there on a later apply: both languages are registered and the
+  // label reads the active one.
+  available = true;
+  client.apply(ctx);
+  assert.deepEqual(Object.keys(dicts.get('dsh-next-input')).sort(), ['en', 'zh']);
+  const live = registrations.filter((entry) => entry.name === 'settings.section').pop();
+  assert.equal(live.label(), '下一步输入');
+  assert.equal(dicts.get('dsh-next-input').zh.hint, '按 Tab 采纳这则预测');
+  assert.equal(dicts.get('dsh-next-input').en.settingsNav, 'Next input');
+
+  service.active = 'en';
+  revision += 1;
+  assert.equal(live.label(), 'Next input');
+
+  // A reload of this plugin alone meets a service that already holds its
+  // dictionaries: the duplicate throws inside the service, nothing breaks, and
+  // the labels keep following the service.
+  assert.doesNotThrow(() => client.apply(ctx));
+  const reloaded = registrations.filter((entry) => entry.name === 'settings.section').pop();
+  assert.equal(reloaded.label(), 'Next input');
+  service.active = 'zh';
+  assert.equal(reloaded.label(), '下一步输入');
+});

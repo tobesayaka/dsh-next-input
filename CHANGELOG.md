@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- Labels listed from a slot's own table now follow the DSH interface language.
+  The settings sidebar row and the composer copy were resolved through
+  `ctx.get('locale')` before the locale service had been provided; the plugin
+  now requires `locale` and registers its Chinese and English dictionaries as
+  one namespace, and the Settings section labels are re-read whenever the
+  interface language changes.
+
 ## 0.5.0
 
 - Named the plugin **Next input** — **下一步输入** in Chinese — everywhere it
@@ -23,7 +32,7 @@
 - The in-flight guards now claim before the first await, so a duplicate that
   arrives while the first prediction is still preparing can no longer slip
   through.
-- 30 tests covering routes, settings, route selection, usage, parser, and
+- 31 tests covering routes, settings, route selection, usage, parser, and
   client registration.
 
 ## 0.3.0

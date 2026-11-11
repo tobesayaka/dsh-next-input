@@ -79,6 +79,73 @@ window.__ModuleLoader__.load({
 [${GHOST_ATTR}] [data-composer-placeholder]{visibility:hidden !important}
 `;
 
+    /**
+     * The DSH locale runtime (`@deepseek-ai/dsh-client-locale`), or `null`.
+     *
+     * The service is looked up on every call, never captured: this plugin's
+     * client entry loads in the boot tier and may run before the locale plugin
+     * has provided it, and a later switch of the interface language must be
+     * seen as well. Without the service the plugin keeps its built-in English
+     * copy instead of showing raw keys.
+     * @param {any} ctx
+     * @returns {any}
+     */
+    function localeService(ctx) {
+      try {
+        const face = ctx.get('locale');
+        return face !== undefined && face !== null && typeof face.bind === 'function' ? face : null;
+      } catch (error) {
+        return null;
+      }
+    }
+
+    /** The locale revision (bumps on a language switch and on registration), or 0. */
+    function localeRevision(ctx) {
+      const face = localeService(ctx);
+      if (face === null) return 0;
+      try {
+        const snapshot = face.getSnapshot();
+        return snapshot !== null && snapshot !== undefined && typeof snapshot.revision === 'number' ? snapshot.revision : 0;
+      } catch (error) {
+        return 0;
+      }
+    }
+
+    /**
+     * Subscribe to locale revisions. Returns a no-op before the service exists;
+     * the next render after it appears resubscribes (the subscribe identity is
+     * stable, so React keeps the one subscription once there is something to
+     * subscribe to).
+     */
+    function subscribeLocale(ctx, notify) {
+      const face = localeService(ctx);
+      if (face === null || typeof face.subscribe !== 'function') return () => {};
+      try {
+        const stop = face.subscribe(notify);
+        return typeof stop === 'function' ? stop : () => {};
+      } catch (error) {
+        return () => {};
+      }
+    }
+
+    /**
+     * Copy for one key: the active DSH language when the locale service has the
+     * namespace, the built-in English text otherwise.
+     * @param {any} ctx
+     * @param {string} key
+     * @returns {string}
+     */
+    function translate(ctx, key) {
+      const face = localeService(ctx);
+      if (face === null) return FALLBACK[key] || key;
+      try {
+        const text = face.bind(NS)(key);
+        return text === key ? (FALLBACK[key] || key) : text;
+      } catch (error) {
+        return FALLBACK[key] || key;
+      }
+    }
+
     // Session-scoped marks live on the HTML root (not localStorage): they
     // vanish with the page and survive overlay remounts and HMR, so one answer
     // triggers at most one model call per page. `tab`/`hit`/`routed` are
@@ -303,24 +370,18 @@ window.__ModuleLoader__.load({
       const phase = useInput((state) => (state !== null && state !== undefined && typeof state.phase === 'string' ? state.phase : 'inert'));
       const running = useSession((state) => (state !== null && state !== undefined && state.running === true));
 
-      const localeRevision = React.useSyncExternalStore(
-        React.useCallback((notify) => {
-          const locale = ctx.get('locale');
-          return locale === undefined || locale === null ? () => {} : locale.subscribe(notify);
-        }, []),
-        () => {
-          const locale = ctx.get('locale');
-          return locale === undefined || locale === null ? 0 : locale.getSnapshot().revision;
-        },
+      // Re-read on every locale revision: the dictionaries may register, or the
+      // interface language switch, after this entry first rendered. The outlet
+      // already re-renders on locale changes; this keeps the copy correct even
+      // when the plugin is mounted outside one. The revision is kept in a local
+      // so the effect below can depend on the number, not on the helper.
+      const localeNow = React.useSyncExternalStore(
+        React.useCallback((notify) => subscribeLocale(ctx, notify), []),
+        () => localeRevision(ctx),
         () => 0,
       );
 
-      const t = (key) => {
-        const locale = ctx.get('locale');
-        if (locale === undefined || locale === null) return FALLBACK[key] || key;
-        const text = locale.bind(NS)(key);
-        return text === key ? (FALLBACK[key] || key) : text;
-      };
+      const t = (key) => translate(ctx, key);
 
       const rootRef = React.useRef(null);
       const inputActionsRef = React.useRef(inputActions);
@@ -882,7 +943,7 @@ window.__ModuleLoader__.load({
           if (frame !== 0) window.cancelAnimationFrame(frame);
           stopObservers();
         };
-      }, [suggestion, draft, phase, sessionId, localeRevision]);
+      }, [suggestion, draft, phase, sessionId, localeNow]);
 
       // Hide the placeholder only after the ghost is actually positioned, and
       // only when this build still exposes the marker. If the composer changes,
@@ -1193,23 +1254,12 @@ window.__ModuleLoader__.load({
       }
 
       return function NextInputSettings() {
-        const localeRevision = React.useSyncExternalStore(
-          React.useCallback((notify) => {
-            const locale = ctx.get('locale');
-            return locale === undefined || locale === null ? () => {} : locale.subscribe(notify);
-          }, []),
-          () => {
-            const locale = ctx.get('locale');
-            return locale === undefined || locale === null ? 0 : locale.getSnapshot().revision;
-          },
+        React.useSyncExternalStore(
+          React.useCallback((notify) => subscribeLocale(ctx, notify), []),
+          () => localeRevision(ctx),
           () => 0,
         );
-        const t = (key) => {
-          const locale = ctx.get('locale');
-          if (locale === undefined || locale === null) return FALLBACK[key] || key;
-          const text = locale.bind(NS)(key);
-          return text === key ? (FALLBACK[key] || key) : text;
-        };
+        const t = (key) => translate(ctx, key);
 
         const [form, setForm] = React.useState(null);
         const [providers, setProviders] = React.useState([]);
@@ -1627,121 +1677,133 @@ window.__ModuleLoader__.load({
       };
     }
 
+    // Copy for the DSH locale service. Registered both unconditionally; the
+    // built-in English table stays the fallback when the service is absent.
+    const zhDictionary = {
+        tab: 'Tab',
+        hint: '按 Tab 采纳这则预测',
+        enterSend: 'Enter 发送',
+        hintEnter: '按 Tab 采纳，Enter 采纳并发送',
+        fallback: '预测',
+        announce: '有可用的下一步输入预测，按 Tab 采纳。',
+        announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
+        settingsNav: '下一步输入',
+        settingsTitle: '下一步输入',
+        settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
+        sectionPrediction: '预测',
+        sectionModel: '模型与延迟',
+        sectionContext: '上下文与输出',
+        sectionUsage: '用量（本次 Host 运行）',
+        usageCalls: '预测调用次数',
+        usageTokens: '消耗 token',
+        usageAverage: '平均每次',
+        usageInput: '输入 token',
+        usageOutput: '输出 token',
+        usageCacheRead: '命中缓存的输入',
+        usageServed: '缓存直接命中 {answered} 次 · 拒绝重复请求 {duplicate} 次',
+        usageNoReport: '（{count} 次调用未返回 token 用量）',
+        usageScope: '只统计本插件在 Host 进程内存里的计数，DSH 重启后清零；“重置计数”不会改动任何设置。',
+        usageReset: '重置计数',
+        enterToSendLabel: 'Enter 采纳并发送',
+        enterToSendHint: 'Tab 只采纳；普通 Enter 会采纳并发送预测。',
+        predictOnActivateLabel: '打开会话时预生成',
+        predictOnActivateHint: '当前回答没有缓存时，打开会话会生成一次预测；会多一次模型调用。',
+        predictionProviderLabel: '预测 provider',
+        predictionProviderHint: '默认跟随当前对话中选中的模型（取不到时用产生最后一条回答的模型）。只有想固定一个更快、专用的模型时才需要选择。',
+        predictionModelLabel: '预测 model',
+        predictionModelHint: '仅在上一项选了 provider 时生效。',
+        maxTokensLabel: '最大输出 token',
+        timeoutLabel: '超时（毫秒）',
+        maxContextCharsLabel: '最大上下文字符',
+        maxMessagesLabel: '最大消息条数',
+        maxSuggestionCharsLabel: '最大建议字符',
+        save: '保存',
+        saving: '保存中…',
+        reset: '重置为 profile 默认值',
+        saved: '已保存，应用到下一次预测。',
+        loadFailed: '无法加载配置。',
+        saveFailed: '无法保存配置。',
+        loading: '加载中…',
+        providerPair: 'provider 和 model 必须同时填写，或同时留空。',
+        automaticRoute: '跟随当前对话的模型',
+        selectModel: '选择模型',
+        noModels: '没有可用模型',
+        invalidNumber: '请输入 {min} 到 {max} 之间的整数。',
+        readOnly: '当前 profile 不允许编辑配置。',
+    };
+    
+    const enDictionary = {
+        tab: 'Tab',
+        hint: 'Press Tab to accept this prediction',
+        enterSend: 'Enter sends',
+        hintEnter: 'Press Tab to accept or Enter to accept and send',
+        fallback: 'Prediction',
+        announce: 'A next-input prediction is available. Press Tab to accept.',
+        announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
+        settingsNav: 'Next input',
+        settingsTitle: 'Next input',
+        settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
+        sectionPrediction: 'Prediction',
+        sectionModel: 'Model & latency',
+        sectionContext: 'Context & output',
+        sectionUsage: 'Usage (this Host session)',
+        usageCalls: 'Prediction calls',
+        usageTokens: 'Tokens used',
+        usageAverage: 'Avg per call',
+        usageInput: 'Input tokens',
+        usageOutput: 'Output tokens',
+        usageCacheRead: 'Cache-hit input',
+        usageServed: '{answered} answers served from the cache · {duplicate} duplicate requests refused',
+        usageNoReport: '({count} calls reported no token usage)',
+        usageScope: 'Counted by this plugin only, in Host process memory: a DSH restart clears it. Resetting the counters never deletes settings.',
+        usageReset: 'Reset counters',
+        enterToSendLabel: 'Enter accepts and sends',
+        enterToSendHint: 'Tab only accepts; plain Enter accepts and sends the prediction.',
+        predictOnActivateLabel: 'Predict on session open',
+        predictOnActivateHint: 'When no cached prediction exists, opening a session generates one. Costs one model call.',
+        predictionProviderLabel: 'Prediction provider',
+        predictionProviderHint: 'Default: follow the model selected in each conversation (falling back to the model that produced the last answer). Pick a route only to pin a dedicated, faster model.',
+        predictionModelLabel: 'Prediction model',
+        predictionModelHint: 'Only used with a provider picked above.',
+        maxTokensLabel: 'Max output tokens',
+        timeoutLabel: 'Timeout (ms)',
+        maxContextCharsLabel: 'Max context characters',
+        maxMessagesLabel: 'Max messages',
+        maxSuggestionCharsLabel: 'Max suggestion characters',
+        save: 'Save',
+        saving: 'Saving…',
+        reset: 'Reset to profile defaults',
+        saved: 'Saved. Applies to the next prediction.',
+        loadFailed: 'Could not load settings.',
+        saveFailed: 'Could not save settings.',
+        loading: 'Loading…',
+        providerPair: 'Set both provider and model, or leave both empty.',
+        automaticRoute: 'Follow the conversation’s model',
+        selectModel: 'Select a model',
+        noModels: 'No models advertised',
+        invalidNumber: 'Enter a whole number between {min} and {max}.',
+        readOnly: 'Settings are not editable in this profile.',
+    };
+
     const api = {
-      inject: ['slots'],
+      // Required for the settings labels: the slot table evaluates a section's
+      // `label` outside any render, so the copy must come from a live locale
+      // service. Waiting for `slots` only is not enough — `slots` is provided
+      // before the locale plugin finishes its async apply.
+      inject: ['slots', 'locale'],
       apply(ctx) {
+        // Both dictionaries are always registered: the service keeps them for the
+        // whole page session and switches between them natively. A duplicate (a
+        // reload of this plugin alone rebuilds the entry over the same service)
+        // throws inside the service; the earlier registration stays in force.
         const locale = ctx.get('locale');
-        if (locale !== undefined && locale !== null) {
-          ctx.effect(() => locale.register(NS, 'zh', {
-            tab: 'Tab',
-            hint: '按 Tab 采纳这则预测',
-            enterSend: 'Enter 发送',
-            hintEnter: '按 Tab 采纳，Enter 采纳并发送',
-            fallback: '预测',
-            announce: '有可用的下一步输入预测，按 Tab 采纳。',
-            announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
-            settingsNav: '下一步输入',
-            settingsTitle: '下一步输入',
-            settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
-            sectionPrediction: '预测',
-            sectionModel: '模型与延迟',
-            sectionContext: '上下文与输出',
-            sectionUsage: '用量（本次 Host 运行）',
-            usageCalls: '预测调用次数',
-            usageTokens: '消耗 token',
-            usageAverage: '平均每次',
-            usageInput: '输入 token',
-            usageOutput: '输出 token',
-            usageCacheRead: '命中缓存的输入',
-            usageServed: '缓存直接命中 {answered} 次 · 拒绝重复请求 {duplicate} 次',
-            usageNoReport: '（{count} 次调用未返回 token 用量）',
-            usageScope: '只统计本插件在 Host 进程内存里的计数，DSH 重启后清零；“重置计数”不会改动任何设置。',
-            usageReset: '重置计数',
-            enterToSendLabel: 'Enter 采纳并发送',
-            enterToSendHint: 'Tab 只采纳；普通 Enter 会采纳并发送预测。',
-            predictOnActivateLabel: '打开会话时预生成',
-            predictOnActivateHint: '当前回答没有缓存时，打开会话会生成一次预测；会多一次模型调用。',
-            predictionProviderLabel: '预测 provider',
-            predictionProviderHint: '默认跟随当前对话中选中的模型（取不到时用产生最后一条回答的模型）。只有想固定一个更快、专用的模型时才需要选择。',
-            predictionModelLabel: '预测 model',
-            predictionModelHint: '仅在上一项选了 provider 时生效。',
-            maxTokensLabel: '最大输出 token',
-            timeoutLabel: '超时（毫秒）',
-            maxContextCharsLabel: '最大上下文字符',
-            maxMessagesLabel: '最大消息条数',
-            maxSuggestionCharsLabel: '最大建议字符',
-            save: '保存',
-            saving: '保存中…',
-            reset: '重置为 profile 默认值',
-            saved: '已保存，应用到下一次预测。',
-            loadFailed: '无法加载配置。',
-            saveFailed: '无法保存配置。',
-            loading: '加载中…',
-            providerPair: 'provider 和 model 必须同时填写，或同时留空。',
-            automaticRoute: '跟随当前对话的模型',
-            selectModel: '选择模型',
-            noModels: '没有可用模型',
-            invalidNumber: '请输入 {min} 到 {max} 之间的整数。',
-            readOnly: '当前 profile 不允许编辑配置。',
-          }), 'next-input: zh dictionary');
-          ctx.effect(() => locale.register(NS, 'en', {
-            tab: 'Tab',
-            hint: 'Press Tab to accept this prediction',
-            enterSend: 'Enter sends',
-            hintEnter: 'Press Tab to accept or Enter to accept and send',
-            fallback: 'Prediction',
-            announce: 'A next-input prediction is available. Press Tab to accept.',
-            announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
-            settingsNav: 'Next input',
-            settingsTitle: 'Next input',
-            settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
-            sectionPrediction: 'Prediction',
-            sectionModel: 'Model & latency',
-            sectionContext: 'Context & output',
-            sectionUsage: 'Usage (this Host session)',
-            usageCalls: 'Prediction calls',
-            usageTokens: 'Tokens used',
-            usageAverage: 'Avg per call',
-            usageInput: 'Input tokens',
-            usageOutput: 'Output tokens',
-            usageCacheRead: 'Cache-hit input',
-            usageServed: '{answered} answers served from the cache · {duplicate} duplicate requests refused',
-            usageNoReport: '({count} calls reported no token usage)',
-            usageScope: 'Counted by this plugin only, in Host process memory: a DSH restart clears it. Resetting the counters never deletes settings.',
-            usageReset: 'Reset counters',
-            enterToSendLabel: 'Enter accepts and sends',
-            enterToSendHint: 'Tab only accepts; plain Enter accepts and sends the prediction.',
-            predictOnActivateLabel: 'Predict on session open',
-            predictOnActivateHint: 'When no cached prediction exists, opening a session generates one. Costs one model call.',
-            predictionProviderLabel: 'Prediction provider',
-            predictionProviderHint: 'Default: follow the model selected in each conversation (falling back to the model that produced the last answer). Pick a route only to pin a dedicated, faster model.',
-            predictionModelLabel: 'Prediction model',
-            predictionModelHint: 'Only used with a provider picked above.',
-            maxTokensLabel: 'Max output tokens',
-            timeoutLabel: 'Timeout (ms)',
-            maxContextCharsLabel: 'Max context characters',
-            maxMessagesLabel: 'Max messages',
-            maxSuggestionCharsLabel: 'Max suggestion characters',
-            save: 'Save',
-            saving: 'Saving…',
-            reset: 'Reset to profile defaults',
-            saved: 'Saved. Applies to the next prediction.',
-            loadFailed: 'Could not load settings.',
-            saveFailed: 'Could not save settings.',
-            loading: 'Loading…',
-            providerPair: 'Set both provider and model, or leave both empty.',
-            automaticRoute: 'Follow the conversation’s model',
-            selectModel: 'Select a model',
-            noModels: 'No models advertised',
-            invalidNumber: 'Enter a whole number between {min} and {max}.',
-            readOnly: 'Settings are not editable in this profile.',
-          }), 'next-input: en dictionary');
+        if (locale !== undefined && locale !== null && typeof locale.register === 'function') {
+          try {
+            locale.register(NS, { zh: zhDictionary, en: enDictionary });
+          } catch (error) {}
         }
 
-        const label = (key) => () => {
-          const current = ctx.get('locale');
-          return current === undefined || current === null ? (FALLBACK[key] || key) : current.bind(NS)(key);
-        };
+        const label = (key) => () => translate(ctx, key);
 
         // One page, one place: the plugin's own top-level Settings section
         // (its own sidebar row and icon). It used to also register a tab under

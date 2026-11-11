@@ -12,6 +12,7 @@
 - Host 按 `sessionId + answerKey` 缓存预测；切会话、overlay 重挂载、刷新页面后可以恢复。
 - 只有草稿为空、会话空闲时显示 ghost。
 - 按 Tab 采纳；默认开启“普通 Enter 采纳并发送”。
+- 跟随 DSH 界面语言：输入框提示、读屏播报和设置页随 DSH 语言实时切换中英文（取不到语言服务时用内置英文文案兜底）。
 - 不把对话写入预测缓存、会话日志或 `localStorage`。
 
 ## 环境要求
@@ -70,6 +71,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 - provider/model 下拉通过 `llm.listProviders()` 和 `llm.listModels()` 填充；已经不在目录里的旧值会作为 `(unavailable)` 选项保留。
 - 想恢复“跟随当前对话的模型”，在 provider 下拉里选回这一项即可，它会同时清空两个字段。
 - 用量数字来自每次预测时 provider 返回的 `usage`，只保存在 Host 进程内存里（DSH 重启清零）；`GET /api/next-input.usage` 返回同一组数字。
+- 设置页和输入框内的文案跟随 DSH 界面语言（设置 → 通用 → 语言）。插件要求 `locale` 服务可用，并把中英字典注册为同一个命名空间；界面语言变化时，设置分区的标签也会重新读取。
 
 ## 工作原理
 
@@ -136,7 +138,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 ## 开发
 
 ```bash
-npm test        # 30 个测试
+npm test        # 31 个测试
 npm run check   # node --check host/client
 ```
 
