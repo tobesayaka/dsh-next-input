@@ -22,8 +22,8 @@ in the empty composer, and lets the user accept it with **Tab**.
 
 ## Requirements
 
-- DSH Web UI with `conversation.input.overlay`, `settings.plugins.tab`, and
-  `settings.section`.
+- DSH Web UI with the `conversation.input.overlay`, `settings.section`, and
+  `settings.section.icon` slots.
 - A registered LLM provider route.
 - Node 22+/DSH version satisfied by the package `engines` field.
 
@@ -59,9 +59,10 @@ until you press send.
 
 ## Settings
 
-Open **Settings → NextInput** (a top-level settings section named after the
-plugin). The same page is also available as **Settings → Plugins →
-NextInput**. It provides:
+Open **Settings → Next input**: the plugin's own top-level settings section,
+with its own sidebar row and icon, between the built-in *Shell* and *Built-in
+plugins* sections. This is the only place to edit it — there is no duplicate tab
+under *Built-in plugins* any more. It provides:
 
 | Control | Meaning |
 |---|---|
@@ -212,7 +213,7 @@ npm run check   # node --check for host and client halves
 Layout:
 
 - `src/index.js` — Host routes, prediction call, cache, settings file.
-- `src/client.js` — composer ghost, key handling, settings tab, locale.
+- `src/client.js` — composer ghost, key handling, settings section, locale.
 - `cordis.patch.yml` — inserts the `next-input` row.
 - `locale/` — Plugin Manager metadata and client strings.
 - `test/` — host route, parser, and client registration tests.

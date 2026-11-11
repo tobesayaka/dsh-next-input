@@ -117,19 +117,21 @@ test('the client half loads and registers the composer overlay', () => {
   };
   client.apply(ctx);
   const composer = registrations.find((entry) => entry.options.name === 'conversation.input.overlay');
-  const settings = registrations.find((entry) => entry.options.name === 'settings.plugins.tab');
   assert.ok(composer);
   assert.equal(composer.options.id, 'next-input');
   assert.equal(typeof composer.component, 'function');
-  assert.ok(settings);
-  assert.equal(settings.options.id, 'next-input');
-  assert.equal(typeof settings.component, 'function');
-  assert.equal(settings.options.label(), 'NextInput');
 
+  // One page, one place: the section only. No copy under Built-in plugins.
+  assert.equal(
+    registrations.filter((entry) => entry.options.name === 'settings.plugins.tab').length,
+    0,
+    'the settings page is not duplicated as a tab under Built-in plugins',
+  );
   const section = registrations.find((entry) => entry.options.name === 'settings.section');
   assert.ok(section, 'a top-level settings section names the plugin');
   assert.equal(section.options.id, 'next-input');
-  assert.equal(section.options.label(), 'NextInput');
+  assert.equal(section.options.label(), 'Next input');
+  assert.equal(typeof section.component, 'function');
   const icon = registrations.find((entry) => entry.options.name === 'settings.section.icon');
   assert.ok(icon, 'the settings section has a nav icon');
   assert.equal(icon.options.id, 'next-input');

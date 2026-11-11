@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "NextInput",
+    "title": "Next input",
     "description": "Predicts your next message after an answer and offers it as ghost text in the composer; press Tab to accept. Enter accepts and sends by default."
   },
   "tab": "Tab",

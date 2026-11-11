@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Named the plugin **Next input** — **下一步输入** in Chinese — everywhere it
+  is shown: the Plugins page title, the Settings sidebar row, the page title,
+  and the nav icon label.
+- Removed the tab under **Settings → Built-in plugins**. The page now lives
+  only in the plugin's own **Settings → Next input** section, whose row order
+  matches the other plugin sections; the sticky action bar no longer paints on
+  the panel surface it inherited from the tab layout.
+
 ## 0.4.0
 
 - Usage counters in the settings page (this Host session): prediction calls,

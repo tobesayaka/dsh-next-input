@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "NextInput",
+    "title": "下一步输入",
     "description": "回答结束后预测你的下一句话，以浅色文字预填在输入框内；按 Tab 采纳，默认 Enter 采纳并发送。"
   },
   "tab": "Tab",

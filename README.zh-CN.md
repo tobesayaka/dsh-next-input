@@ -16,7 +16,7 @@
 
 ## 环境要求
 
-- DSH Web UI，且存在 `conversation.input.overlay`、`settings.plugins.tab` 和 `settings.section` 插槽。
+- DSH Web UI，且存在 `conversation.input.overlay`、`settings.section`、`settings.section.icon` 插槽。
 - 已注册的 LLM provider 路由。
 - 满足 `package.json` 中 `engines` 要求的 DSH/Node 版本。
 
@@ -48,7 +48,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 
 ## 设置页
 
-打开 **设置 → NextInput**（设置侧栏里以插件名命名的一级入口）；同一个页面也出现在 **设置 → 插件 → NextInput**。可以调整：
+打开 **设置 → 下一步输入**：这是插件自己的一级设置分区，有独立的侧栏入口和图标，排在「Shell」和「内置插件」之间。现在只有这一处，**设置 → 插件** 下不再有它的标签页。可以调整：
 
 | 控件 | 含义 |
 |---|---|
@@ -119,7 +119,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 - **切会话/刷新后没有 ghost**：Host 缓存可能为空（重启或插件重载）且 `predictOnActivate` 关闭；下一轮回答会重新填充。
 - **composer 上方出现“预测: …”小 pill**：inline ghost 无法测量，pill 是 fallback；如果持续出现，请报告 composer/版本。
 - **Enter 只填入不发送**：当前 composer 没有暴露 submit action，或草稿在提交前被改动；Tab 仍可填入，可手动发送。
-- **设置页不出现**：安装/重载后刷新页面，再打开 设置 → NextInput 或 设置 → 插件。
+- **设置页不出现**：安装/重载后刷新页面，再打开 设置 → 下一步输入。
 - **始终没有预测**：确认输入框为空、会话空闲，且 `llm.listProviders()` 仍包含所选路由。
 
 ## 已知限制
@@ -143,7 +143,7 @@ npm run check   # node --check host/client
 文件：
 
 - `src/index.js` — Host 路由、预测调用、缓存、设置文件。
-- `src/client.js` — 输入框 ghost、按键处理、设置页、locale。
+- `src/client.js` — 输入框 ghost、按键处理、设置分区、locale。
 - `cordis.patch.yml` — 插入 `next-input` 行。
 - `locale/` — Plugin Manager 元数据和客户端文案。
 - `test/` — Host 路由、解析、Client 注册测试。

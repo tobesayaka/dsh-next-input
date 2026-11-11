@@ -30,9 +30,8 @@ window.__ModuleLoader__.load({
       announce: 'A next-input prediction is available. Press Tab to accept.',
       announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
       fallback: 'Prediction',
-      settingsNav: 'NextInput',
-      settingsTab: 'NextInput',
-      settingsTitle: 'NextInput',
+      settingsNav: 'Next input',
+      settingsTitle: 'Next input',
       settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
       sectionPrediction: 'Prediction',
       sectionModel: 'Model & latency',
@@ -1053,6 +1052,7 @@ window.__ModuleLoader__.load({
       };
       const TITLE = { fontSize: 16, lineHeight: '24px', fontWeight: 600 };
       const INTRO = { color: 'var(--dsw-alias-label-secondary)', fontSize: 12, lineHeight: '18px', maxWidth: 560 };
+      const HEAD = { padding: '6px 0 12px' };
       const SECTION = { display: 'flex', flexDirection: 'column', gap: 2 };
       const SECTION_TITLE = {
         fontSize: 11,
@@ -1093,18 +1093,10 @@ window.__ModuleLoader__.load({
         paddingTop: 8,
         marginTop: 2,
         flexWrap: 'wrap',
-        // The scrolled content column owns the horizontal padding, so the bar
-        // spans edge to edge on the panel surface while its controls line up
-        // with the fields above.
-        marginLeft: -20,
-        marginRight: -20,
-        paddingLeft: 20,
-        paddingRight: 20,
-        boxSizing: 'border-box',
-        position: 'sticky',
-        bottom: 0,
-        zIndex: 1,
-        background: 'var(--dsw-alias-bg-layer-2)',
+        // The settings shell already scrolls the content column and owns its
+        // horizontal padding, so the bar only needs a hairline and room to
+        // breathe; it must not reach for the panel surface it sat on when this
+        // page was a tab.
         borderTop: '0.5px solid var(--dsw-alias-border-l1)',
         paddingBottom: 4,
       };
@@ -1522,8 +1514,10 @@ window.__ModuleLoader__.load({
         }
         if (!editable) {
           return column([
-            React.createElement('div', { style: TITLE }, t('settingsTitle')),
-            React.createElement('div', { style: INTRO }, t('settingsIntro')),
+            React.createElement('div', { style: HEAD },
+              React.createElement('div', { style: TITLE }, t('settingsTitle')),
+              React.createElement('div', { style: INTRO }, t('settingsIntro')),
+            ),
             React.createElement('div', { style: ERROR }, t('readOnly')),
           ]);
         }
@@ -1581,7 +1575,7 @@ window.__ModuleLoader__.load({
         };
 
         return column([
-          React.createElement('div', null,
+          React.createElement('div', { style: HEAD },
             React.createElement('div', { style: TITLE }, t('settingsTitle')),
             React.createElement('div', { style: INTRO }, t('settingsIntro')),
           ),
@@ -1646,9 +1640,8 @@ window.__ModuleLoader__.load({
             fallback: '预测',
             announce: '有可用的下一步输入预测，按 Tab 采纳。',
             announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
-            settingsNav: 'NextInput',
-            settingsTab: 'NextInput',
-            settingsTitle: 'NextInput',
+            settingsNav: '下一步输入',
+            settingsTitle: '下一步输入',
             settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
             sectionPrediction: '预测',
             sectionModel: '模型与延迟',
@@ -1699,9 +1692,8 @@ window.__ModuleLoader__.load({
             fallback: 'Prediction',
             announce: 'A next-input prediction is available. Press Tab to accept.',
             announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
-            settingsNav: 'NextInput',
-            settingsTab: 'NextInput',
-            settingsTitle: 'NextInput',
+            settingsNav: 'Next input',
+            settingsTitle: 'Next input',
             settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
             sectionPrediction: 'Prediction',
             sectionModel: 'Model & latency',
@@ -1751,27 +1743,22 @@ window.__ModuleLoader__.load({
           return current === undefined || current === null ? (FALLBACK[key] || key) : current.bind(NS)(key);
         };
 
-        // Settings → Plugins keeps a tab under the plugin's row.
-        ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-          name: 'settings.plugins.tab',
-          id: 'next-input',
-          order: 50,
-          label: label('settingsTab'),
-        }, createSettingsPage(ctx)));
-
-        // Settings nav: a top-level section named after the plugin, so it is
-        // obvious which plugin the page belongs to.
+        // One page, one place: the plugin's own top-level Settings section
+        // (its own sidebar row and icon). It used to also register a tab under
+        // Settings → Built-in plugins; a second copy of the same form is just
+        // somewhere else to edit it.
+        const SettingsPage = createSettingsPage(ctx);
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section',
           id: 'next-input',
-          order: 60,
+          order: 40,
           label: label('settingsNav'),
-        }, createSettingsPage(ctx)));
+        }, SettingsPage));
 
         ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
           name: 'settings.section.icon',
           id: 'next-input',
-          order: 60,
+          order: 40,
           label: label('settingsNav'),
         }, (props) => {
           const size = props !== null && props !== undefined && typeof props.size === 'number' ? props.size : 16;
