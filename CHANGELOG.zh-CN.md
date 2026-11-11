@@ -1,5 +1,14 @@
 # 更新日志
 
+## 0.3.0
+
+- `enterToSend` 与 `predictOnActivate` 默认改为 `true`；仍可在设置页或 profile 行 `config` 里关闭。
+- 预测路由默认跟随当前对话选中的模型：客户端读取会话的 `modelSelection` 投影并随每次预测发送；Host 依次取设置里的固定路由、会话选中的模型、最后一条回答的路由，并返回 `route: { provider, model, source }`。
+- 设置页改名为 **NextInput**，并在设置侧栏新增同名一级入口（带导航图标）；**设置 → 插件** 下的 Tab 仍然是同一个页面。
+- provider 下拉的自动项改为“跟随当前对话的模型”，选中时会同时清空两个路由字段。
+- 修复“保存”按钮看不清的问题：主按钮改用 Host 的 `button-primary-fill` / `label-primary-foreground` 配对（浅色主题下深色底、浅色字），不再在 `brand-primary` 上放白字（浅色主题下 `brand-primary` 是深色文字色）。操作栏固定在分区底部，按钮加高，次要按钮样式也做了区分。
+- 28 个测试覆盖路由、设置、路由选择、解析和 Client 注册。
+
 ## 0.2.0
 
 - Host 侧按 `sessionId + answerKey` 缓存预测，支持 dismissed 墓碑；切会话、刷新页面、换端口后可恢复。

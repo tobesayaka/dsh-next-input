@@ -124,6 +124,16 @@ test('the client half loads and registers the composer overlay', () => {
   assert.ok(settings);
   assert.equal(settings.options.id, 'next-input');
   assert.equal(typeof settings.component, 'function');
+  assert.equal(settings.options.label(), 'NextInput');
+
+  const section = registrations.find((entry) => entry.options.name === 'settings.section');
+  assert.ok(section, 'a top-level settings section names the plugin');
+  assert.equal(section.options.id, 'next-input');
+  assert.equal(section.options.label(), 'NextInput');
+  const icon = registrations.find((entry) => entry.options.name === 'settings.section.icon');
+  assert.ok(icon, 'the settings section has a nav icon');
+  assert.equal(icon.options.id, 'next-input');
+  assert.equal(typeof icon.component, 'function');
 
   const entries = [
     {
@@ -268,4 +278,35 @@ test('the client half loads and registers the composer overlay', () => {
     { role: 'user', text: 'same' },
     { role: 'assistant', text: 'ok' },
   ]));
+});
+
+test('reads the Session model selection from the modelSelection projection', () => {
+  const client = loadClient(makeStorage());
+  const faceOf = (value) => ({
+    getSnapshot() {
+      return value;
+    },
+  });
+  const sessionsWith = (value) => ({
+    binding() {
+      return { projections: { faceOf(key) { return faceOf(key === 'modelSelection' ? value : undefined); } } };
+    },
+  });
+
+  assert.equal(JSON.stringify(client.__test.readSelection(
+    sessionsWith({ lastUsed: { provider: 'p', model: 'm1' }, next: { provider: 'p', model: 'm2' } }),
+    'session-1',
+  )), JSON.stringify({ provider: 'p', model: 'm2' }));
+  assert.equal(JSON.stringify(client.__test.readSelection(
+    sessionsWith({ lastUsed: { provider: 'p', model: 'm1' }, next: null }),
+    'session-1',
+  )), JSON.stringify({ provider: 'p', model: 'm1' }));
+
+  // Capability absent, empty face, or incomplete values degrade to null.
+  assert.equal(client.__test.readSelection({ binding() { return {}; } }, 'session-1'), null);
+  assert.equal(client.__test.readSelection(sessionsWith(undefined), 'session-1'), null);
+  assert.equal(client.__test.readSelection(sessionsWith({ lastUsed: { provider: '', model: 'm' }, next: null }), 'session-1'), null);
+  assert.equal(client.__test.readSelection(sessionsWith({ lastUsed: null, next: null }), 'session-1'), null);
+  assert.equal(client.__test.readSelection({ binding() { throw new Error('gone'); } }, 'session-1'), null);
+  assert.equal(client.__test.readSelection(undefined, 'session-1'), null);
 });

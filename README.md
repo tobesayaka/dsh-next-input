@@ -10,18 +10,20 @@ in the empty composer, and lets the user accept it with **Tab**.
 
 - Watches the current Session after a turn settles.
 - Reads only human and assistant text from the loaded event window.
-- Uses the route that produced the latest assistant answer, or an optional faster
-  prediction route.
+- Uses the model selected in the conversation (falling back to the route that
+  produced the latest assistant answer), or an optional fixed prediction route.
 - Caches predictions on the Host by `sessionId + answerKey`, so switching
   Sessions, remounting the composer, or reloading the page restores the ghost.
 - Shows the prediction only while the composer is empty and the Session is idle.
-- `Tab` accepts the prediction; optional plain `Enter` accepts **and sends** it.
+- `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
+  it.
 - Never writes the conversation into a prediction cache, Session log, or
   `localStorage`.
 
 ## Requirements
 
-- DSH Web UI with `conversation.input.overlay` and `settings.plugins.tab`.
+- DSH Web UI with `conversation.input.overlay`, `settings.plugins.tab`, and
+  `settings.section`.
 - A registered LLM provider route.
 - Node 22+/DSH version satisfied by the package `engines` field.
 
@@ -48,22 +50,24 @@ The bundle has no package dependencies. After installation, the plugin row
 1. Keep the composer empty after an assistant answer.
 2. A grey prediction and a `Tab` keycap appear in the input.
 3. Press `Tab` to fill the full suggestion.
-4. If `enterToSend` is enabled, plain `Enter` accepts and sends the prediction;
-   `Shift+Enter` remains a newline.
+4. By default (`enterToSend` on), plain `Enter` accepts and sends the
+   prediction; `Shift+Enter` remains a newline.
 5. Type anything, start a new turn, press `Esc`, or accept the ghost to dismiss it.
 
-The prediction is only preview text. Nothing is submitted until you press Enter
-(with `enterToSend` enabled) or send it yourself.
+The prediction is only preview text. In accept-only mode nothing is submitted
+until you press send.
 
 ## Settings
 
-Open **Settings → Plugins → Next input**. The tab provides:
+Open **Settings → NextInput** (a top-level settings section named after the
+plugin). The same page is also available as **Settings → Plugins →
+NextInput**. It provides:
 
 | Control | Meaning |
 |---|---|
-| Enter accepts and sends (`enterToSend`) | Plain Enter accepts and submits; Tab still accepts only. Default off. |
-| Predict on session open (`predictOnActivate`) | On a cache miss, opening an idle Session generates one prediction. Costs one model call. Default off. |
-| Prediction provider / model | Optional faster route, chosen from registered providers and their advertised models. Leave both on “Use latest answer’s route” to reuse the current answer route. |
+| Enter accepts and sends (`enterToSend`) | Plain Enter accepts and submits; Tab still accepts only. Default on. |
+| Predict on session open (`predictOnActivate`) | On a cache miss, opening an idle Session generates one prediction. Costs one model call. Default on. |
+| Prediction provider / model | Optional fixed route, chosen from registered providers and their advertised models. By default the provider stays on “Follow the conversation's model”: each prediction uses the model selected in that conversation, falling back to the model that produced the last answer. Pick provider + model only to pin a dedicated, faster route. |
 | Max output tokens (`maxTokens`) | Output cap for the auxiliary model call. |
 | Timeout (ms) | Wall-clock bound for one prediction. |
 | Max context characters | Conversation characters kept for the prediction. |
@@ -80,6 +84,8 @@ Open **Settings → Plugins → Next input**. The tab provides:
 - Provider/model dropdowns are populated through `llm.listProviders()` and
   `llm.listModels()`. A configured value that is no longer advertised is kept as
   an `(unavailable)` option.
+- To restore the default “follow the conversation's model”, choose that entry
+  in the provider dropdown; it clears both fields.
 
 ## How it works
 
@@ -96,9 +102,19 @@ Open **Settings → Plugins → Next input**. The tab provides:
    `POST /api/next-input.dismiss`, so the prediction does not reappear after a
    reload.
 
-The Host cache is process memory. A DSH/plugin restart clears it. With
-`predictOnActivate: true`, opening a Session fills a missing cache entry with one
-model call; with the default `false`, the next turn is the first chance to refill.
+**Route selection.** The client sends the Session's current model (its
+`modelSelection` projection, `next` before `lastUsed`) together with the answer's
+own route. The Host then calls, in order: the provider/model saved in the
+settings page, the Session's selected model (when its provider is registered),
+and finally the answer's route. Responses carry
+`route: { provider, model, source }` with `source` being `settings`, `session`,
+or `answer` (`fallback: true` when a selection was sent but unusable). The
+prediction call is not the agent's own request, so it never moves the
+Session's model picker.
+
+The Host cache is process memory. A DSH/plugin restart clears it. With the
+default `predictOnActivate: true`, opening a Session fills a missing cache entry
+with one model call; set it to `false` to let the next turn refill instead.
 
 ## Configuration reference
 
@@ -112,20 +128,21 @@ page stores overrides in the plugin's settings file.
 | `maxMessages` | `24` | Conversation messages kept. |
 | `maxTokens` | `512` | Output cap for the prediction call. |
 | `timeoutMs` | `20000` | Wall-clock bound for one prediction. |
-| `enterToSend` | `false` | Plain Enter accepts and sends the prediction. |
-| `predictOnActivate` | `false` | Generate a missing prediction when a Session is opened. |
-| `predictionProvider` | `''` | Optional faster provider route; set both fields or neither. |
-| `predictionModel` | `''` | Optional faster model id; set both fields or neither. |
+| `enterToSend` | `true` | Plain Enter accepts and sends the prediction. |
+| `predictOnActivate` | `true` | Generate a missing prediction when a Session is opened. |
+| `predictionProvider` | `''` | Optional fixed provider route; set both fields or neither. Empty means “follow the Session's model”. |
+| `predictionModel` | `''` | Optional fixed model id; set both fields or neither. |
 
 ## Speed
 
 A cache hit is immediate. A cache miss is one model call, so its latency is
 dominated by the model. To make predictions appear sooner:
 
-- Pick a fast, non-reasoning provider/model in the Settings page.
+- Pick a fast, non-reasoning provider/model in the Settings page when the
+  conversation's model is slow.
 - Lower `maxTokens` (for example `256`) and, if needed, the context budgets.
-- Keep `predictOnActivate` off to avoid pre-generation calls; enable it when you
-  prefer the ghost to be ready after opening a Session.
+- Keep `predictOnActivate` on when you want the ghost ready right after opening
+  a Session, off to avoid pre-generation calls.
 - The client starts the turn-end prediction after a short settle delay and
   retries briefly while the event window catches up.
 
@@ -144,7 +161,7 @@ Each prediction consumes provider tokens. Disable the plugin row or turn off
 ## Troubleshooting
 
 - **No ghost after switching Sessions or reloading:** the Host cache may be
-  empty (restart or plugin reload), or `predictOnActivate` is off. The next
+  empty (restart or plugin reload) and `predictOnActivate` is off. The next
   completed turn repopulates it.
 - **A small “Prediction: …” pill appears above the composer:** the inline ghost
   could not be measured; the pill is the fallback. Report the composer/version if
@@ -166,10 +183,10 @@ Each prediction consumes provider tokens. Disable the plugin row or turn off
 - The Host cache is process memory; a DSH/plugin restart clears it.
 - The trigger is a running-state transition. A turn that starts and ends between
   renders, or an answer completed while the overlay was unmounted, needs
-  `predictOnActivate` or the next turn.
+  `predictOnActivate` (default on) or the next turn.
 - No component-level browser test; route, parser, and settings route tests exist.
-- “Current model” means the latest answer's route unless a prediction route is
-  configured.
+- “The current model” means the model selected in the Session, then the latest
+  answer's route, unless a prediction route is pinned in Settings.
 - Only the loaded browser event window contributes context.
 - The settings page is plugin-owned rather than a schema-derived Plugin Manager
   form.
@@ -178,7 +195,7 @@ Each prediction consumes provider tokens. Disable the plugin row or turn off
 ## Development
 
 ```bash
-npm test        # 23 tests
+npm test        # 28 tests
 npm run check   # node --check for host and client halves
 ```
 

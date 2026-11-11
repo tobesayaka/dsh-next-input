@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "Next input prediction",
-    "description": "Predicts your next message after an answer and shows it as ghost text; press Tab to accept."
+    "title": "NextInput",
+    "description": "Predicts your next message after an answer and offers it as ghost text in the composer; press Tab to accept. Enter accepts and sends by default."
   },
   "tab": "Tab",
   "hint": "Press Tab to accept this prediction"

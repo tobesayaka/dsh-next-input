@@ -99,7 +99,11 @@ test('answers with one cleaned prediction through the current route', async () =
   const { route, calls } = install(goodStream);
   const response = await route.fetch(requestFor(conversation));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { suggestion: 'Run the uploader tests.' });
+  assert.deepEqual(await response.json(), {
+    suggestion: 'Run the uploader tests.',
+    enterToSend: true,
+    route: { provider: 'deepseek-official', model: 'deepseek-v4-flash', source: 'answer' },
+  });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].provider, 'deepseek-official');
   assert.equal(calls[0].model, 'deepseek-v4-flash');
@@ -110,6 +114,19 @@ test('answers with one cleaned prediction through the current route', async () =
   assert.equal(calls[0].options.sessionId, 'session-1');
   assert.match(calls[0].options.messages[0].content[0].text, /Add a retry to the uploader\./);
   assert.match(calls[0].options.messages[0].content[0].text, /Predict the user's next message now\./);
+});
+
+test('rejects a request whose answer route is empty even with a selection', async () => {
+  const { route, calls } = install(goodStream);
+  const response = await route.fetch(requestFor({
+    ...conversation,
+    provider: '',
+    model: '',
+    selection: { provider: 'deepseek-official', model: 'selected-model' },
+  }));
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: 'missing_model' });
+  assert.equal(calls.length, 0);
 });
 
 test('rejects requests without an assistant answer', async () => {
@@ -198,21 +215,26 @@ test('reports a max-token cut instead of silently returning nothing', async () =
   const { route } = install(cutStream);
   const response = await route.fetch(requestFor(conversation));
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { suggestion: 'partial', truncated: true });
+  assert.deepEqual(await response.json(), {
+    suggestion: 'partial',
+    truncated: true,
+    enterToSend: true,
+    route: { provider: 'deepseek-official', model: 'deepseek-v4-flash', source: 'answer' },
+  });
 });
 
-test('advertises enterToSend only when the boolean config enables it', async () => {
-  const off = install(goodStream);
+test('advertises enterToSend when the boolean config enables it (the default)', async () => {
+  const defaults = install(goodStream);
+  const defaultsBody = await (await defaults.route.fetch(requestFor(conversation))).json();
+  assert.equal(defaultsBody.enterToSend, true);
+
+  const off = install(goodStream, { enterToSend: false });
   const offBody = await (await off.route.fetch(requestFor(conversation))).json();
   assert.equal(offBody.enterToSend, undefined);
 
-  const on = install(goodStream, { enterToSend: true });
-  const onBody = await (await on.route.fetch(requestFor(conversation))).json();
-  assert.equal(onBody.enterToSend, true);
-
   const ignored = install(goodStream, { enterToSend: 'true' });
   const ignoredBody = await (await ignored.route.fetch(requestFor(conversation))).json();
-  assert.equal(ignoredBody.enterToSend, undefined);
+  assert.equal(ignoredBody.enterToSend, true);
 });
 
 test('rejects a missing, unknown, or unregistered route', async () => {
@@ -254,7 +276,9 @@ test('rejects a second in-flight prediction for the same session', async () => {
   release();
   const firstResponse = await first;
   assert.equal(firstResponse.status, 200);
-  assert.deepEqual(await firstResponse.json(), { suggestion: 'slow' });
+  const firstBody = await firstResponse.json();
+  assert.equal(firstBody.suggestion, 'slow');
+  assert.equal(firstBody.route.source, 'answer');
 });
 
 function cachedRequest(sessionId, answerKey) {
@@ -278,8 +302,8 @@ test('serves a cached prediction by answer identity and honors dismissal', async
   const cached = await (await cacheRoute.fetch(cachedRequest('session-1', 'seq:2'))).json();
   assert.equal(cached.cached, true);
   assert.equal(cached.suggestion, 'Run the uploader tests.');
-  assert.equal(cached.enterToSend, false);
-  assert.equal(cached.predictOnActivate, false);
+  assert.equal(cached.enterToSend, true);
+  assert.equal(cached.predictOnActivate, true);
 
   const stale = await (await cacheRoute.fetch(cachedRequest('session-1', 'seq:1'))).json();
   assert.equal(stale.cached, false);
@@ -293,12 +317,17 @@ test('serves a cached prediction by answer identity and honors dismissal', async
   assert.equal(after.dismissed, true);
 });
 
-test('advertises predictOnActivate on cache misses', async () => {
-  const { routes } = install(goodStream, { predictOnActivate: true });
-  const cacheRoute = routes.get('/api/next-input.cached');
-  const missing = await (await cacheRoute.fetch(cachedRequest('session-1', 'seq:2'))).json();
+test('advertises predictOnActivate on cache misses (the default)', async () => {
+  const defaults = install(goodStream);
+  const defaultsCache = defaults.routes.get('/api/next-input.cached');
+  const missing = await (await defaultsCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
   assert.equal(missing.cached, false);
   assert.equal(missing.predictOnActivate, true);
+
+  const off = install(goodStream, { predictOnActivate: false });
+  const offCache = off.routes.get('/api/next-input.cached');
+  const offMissing = await (await offCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
+  assert.equal(offMissing.predictOnActivate, false);
 });
 
 test('uses an explicit fast prediction route when both fields are set', async () => {
@@ -312,6 +341,51 @@ test('uses an explicit fast prediction route when both fields are set', async ()
   assert.equal(calls[0].model, 'fast-model');
   assert.equal(calls[0].options.provider, 'deepseek-official');
   assert.equal(calls[0].options.model, 'fast-model');
+});
+
+test('follows the Session selected model before the answer route', async () => {
+  const { route, calls } = install(goodStream);
+  const response = await route.fetch(requestFor({
+    ...conversation,
+    selection: { provider: 'deepseek-official', model: 'selected-model' },
+  }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(calls[0].provider, 'deepseek-official');
+  assert.equal(calls[0].model, 'selected-model');
+  assert.equal(calls[0].options.model, 'selected-model');
+  assert.deepEqual(body.route, { provider: 'deepseek-official', model: 'selected-model', source: 'session' });
+});
+
+test('keeps the answer route when the selection names an unregistered provider', async () => {
+  const { route, calls } = install(goodStream);
+  const response = await route.fetch(requestFor({
+    ...conversation,
+    selection: { provider: 'gone-provider', model: 'selected-model' },
+  }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(calls[0].model, 'deepseek-v4-flash');
+  assert.deepEqual(body.route, {
+    provider: 'deepseek-official',
+    model: 'deepseek-v4-flash',
+    source: 'answer',
+    fallback: true,
+  });
+});
+
+test('an explicit prediction route wins over the Session selection', async () => {
+  const { route, calls } = install(goodStream, {
+    predictionProvider: 'deepseek-official',
+    predictionModel: 'fast-model',
+  });
+  const response = await route.fetch(requestFor({
+    ...conversation,
+    selection: { provider: 'deepseek-official', model: 'selected-model' },
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(calls[0].model, 'fast-model');
+  assert.equal((await response.json()).route.source, 'settings');
 });
 
 function settingsRequest(method, body) {
@@ -328,6 +402,9 @@ test('reads, saves, and resets settings through the settings route', async () =>
   const initial = await (await settings.fetch(settingsRequest('GET'))).json();
   assert.equal(initial.editable, true);
   assert.equal(initial.values.maxTokens, 512);
+  assert.equal(initial.values.enterToSend, true);
+  assert.equal(initial.values.predictOnActivate, true);
+  assert.deepEqual(initial.route, { source: 'session' });
   assert.equal(initial.providers[0].id, 'deepseek-official');
   assert.equal(initial.providers[0].models[0].id, 'fast-model');
   assert.equal(initial.defaults.maxTokens, 512);
@@ -359,7 +436,9 @@ test('reads, saves, and resets settings through the settings route', async () =>
   const reset = await settings.fetch(settingsRequest('POST', { reset: true }));
   const resetBody = await reset.json();
   assert.equal(resetBody.values.maxTokens, 512);
-  assert.equal(resetBody.values.enterToSend, false);
+  assert.equal(resetBody.values.enterToSend, true);
+  assert.equal(resetBody.values.predictOnActivate, true);
+  assert.equal(resetBody.route.source, 'session');
   assert.throws(() => readFileSync(initial.path, 'utf8'));
 });
 

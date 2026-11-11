@@ -30,9 +30,10 @@ window.__ModuleLoader__.load({
       announce: 'A next-input prediction is available. Press Tab to accept.',
       announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
       fallback: 'Prediction',
-      settingsTab: 'Next input',
-      settingsTitle: 'Next input prediction',
-      settingsIntro: 'Changes apply to the next prediction. Values are stored in DSH user data.',
+      settingsNav: 'NextInput',
+      settingsTab: 'NextInput',
+      settingsTitle: 'NextInput',
+      settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
       sectionPrediction: 'Prediction',
       sectionModel: 'Model & latency',
       sectionContext: 'Context & output',
@@ -41,8 +42,9 @@ window.__ModuleLoader__.load({
       predictOnActivateLabel: 'Predict on session open',
       predictOnActivateHint: 'When no cached prediction exists, opening a session generates one. Costs one model call.',
       predictionProviderLabel: 'Prediction provider',
-      predictionProviderHint: 'Leave both empty to reuse the latest answer’s route.',
+      predictionProviderHint: 'Default: follow the model selected in each conversation (falling back to the model that produced the last answer). Pick a route only to pin a dedicated, faster model.',
       predictionModelLabel: 'Prediction model',
+      predictionModelHint: 'Only used with a provider picked above.',
       maxTokensLabel: 'Max output tokens',
       timeoutLabel: 'Timeout (ms)',
       maxContextCharsLabel: 'Max context characters',
@@ -77,6 +79,36 @@ window.__ModuleLoader__.load({
       maxTokens: [64, 4096],
       timeoutMs: [1000, 120000],
     };
+
+    /**
+     * The model this Session currently has selected, read from the Host's
+     * `modelSelection` projection (`next` is the pending choice, `lastUsed` the
+     * route of the latest answer). Never throws: a missing projection simply
+     * means the Host falls back to the answer's own route.
+     * @param {any} sessions
+     * @param {string | undefined} sessionId
+     * @returns {{ provider: string, model: string } | null}
+     */
+    function readSelection(sessions, sessionId) {
+      if (sessions === undefined || sessions === null || sessionId === undefined || sessionId === null) return null;
+      try {
+        const binding = sessions.binding(sessionId);
+        const projections = binding === undefined || binding === null ? undefined : binding.projections;
+        if (projections === undefined || projections === null || typeof projections.faceOf !== 'function') return null;
+        const face = projections.faceOf('modelSelection');
+        const value = face === undefined || face === null || typeof face.getSnapshot !== 'function'
+          ? undefined
+          : face.getSnapshot();
+        if (value === null || value === undefined || typeof value !== 'object') return null;
+        const picked = value.next === null || value.next === undefined ? value.lastUsed : value.next;
+        if (picked === null || picked === undefined) return null;
+        const provider = typeof picked.provider === 'string' ? picked.provider.trim() : '';
+        const model = typeof picked.model === 'string' ? picked.model.trim() : '';
+        return provider === '' || model === '' ? null : { provider, model };
+      } catch {
+        return null;
+      }
+    }
 
     /**
      * Text blocks of one message; reasoning and tool payloads stay out.
@@ -396,6 +428,7 @@ window.__ModuleLoader__.load({
         if (sessions === undefined || sessions === null || session === undefined || session === null) return;
 
         const conversation = readConversation(sessions, session);
+        const selection = readSelection(sessions, session);
         const last = conversation.messages[conversation.messages.length - 1];
         // The event window can trail the running flag by a frame; retry briefly
         // instead of dropping the turn.
@@ -420,6 +453,7 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({
               provider: conversation.model.provider,
               model: conversation.model.model,
+              ...(selection === null ? {} : { selection }),
               sessionId: session,
               answerKey: conversation.answerKey ?? '',
               messages: conversation.messages,
@@ -902,7 +936,6 @@ window.__ModuleLoader__.load({
         display: 'flex',
         flexDirection: 'column',
         gap: 18,
-        padding: '18px 20px 28px',
         maxWidth: 720,
         color: 'var(--dsw-alias-label-primary)',
         fontSize: 13,
@@ -942,24 +975,67 @@ window.__ModuleLoader__.load({
         font: 'inherit',
         fontSize: 13,
       };
-      const ACTIONS = { display: 'flex', alignItems: 'center', gap: 8, paddingTop: 4, flexWrap: 'wrap' };
-      const BUTTON = {
-        height: 32,
-        padding: '0 12px',
-        borderRadius: 8,
-        border: '0.5px solid var(--dsw-alias-border-l1)',
+      const ACTIONS = {
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        justifyContent: 'flex-start',
+        paddingTop: 8,
+        marginTop: 2,
+        flexWrap: 'wrap',
+        // The scrolled content column owns the horizontal padding, so the bar
+        // spans edge to edge on the panel surface while its controls line up
+        // with the fields above.
+        marginLeft: -20,
+        marginRight: -20,
+        paddingLeft: 20,
+        paddingRight: 20,
+        boxSizing: 'border-box',
+        position: 'sticky',
+        bottom: 0,
+        zIndex: 1,
         background: 'var(--dsw-alias-bg-layer-2)',
-        color: 'var(--dsw-alias-label-primary)',
-        font: 'inherit',
-        fontSize: 13,
+        borderTop: '0.5px solid var(--dsw-alias-border-l1)',
+        paddingBottom: 4,
+      };
+      // Host button metrics: a 36px control that hugs its label with 16px of
+      // side padding, so "Save" stays compact instead of stretching to a
+      // minimum width.
+      const BUTTON = {
+        boxSizing: 'border-box',
+        height: 36,
+        padding: '0 16px',
+        borderRadius: 8,
+        border: '1px solid transparent',
+        fontFamily: 'inherit',
+        fontSize: 14,
+        lineHeight: '22px',
+        fontWeight: 500,
         cursor: 'pointer',
       };
+      // `brand-primary` is the text/accent colour in both themes here, so a
+      // white label on it disappears in the light theme. The Host's primary
+      // button uses the button-primary pair instead: dark fill with a light
+      // foreground in the light theme, the inverse in the dark theme.
       const PRIMARY = {
         ...BUTTON,
-        border: '1px solid transparent',
-        background: 'var(--dsw-alias-brand-primary)',
-        color: '#fff',
+        display: 'inline-flex',
+        alignItems: 'center',
+        background: 'var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary))',
+        color: 'var(--dsw-alias-label-primary-foreground, #fff)',
       };
+      const COMPACT_PRIMARY = { ...PRIMARY, padding: '0 14px' };
+      const PRIMARY_LABEL = { color: 'inherit', whiteSpace: 'nowrap' };
+      const SECONDARY = {
+        ...BUTTON,
+        display: 'inline-flex',
+        alignItems: 'center',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        border: '0.5px solid var(--dsw-alias-border-l1)',
+        color: 'var(--dsw-alias-label-primary)',
+      };
+      const COMPACT_SECONDARY = { ...SECONDARY, padding: '0 12px' };
+      const SECONDARY_LABEL = { color: 'inherit', whiteSpace: 'nowrap' };
       const STATUS = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' };
       const ERROR = { ...STATUS, color: 'var(--dsw-alias-state-error-primary, var(--dsw-alias-label-primary))' };
 
@@ -970,6 +1046,17 @@ window.__ModuleLoader__.load({
         maxTokens: 'maxTokensLabel',
         timeoutMs: 'timeoutLabel',
       };
+
+      // Tab through a settings nav section folds the section into the content
+      // column (narrower than the plugin tab's page), so the shared padding
+      // lives here instead of in PAGE.
+      // The shell scrolls the content column; sticky controls sit on the
+      // panel surface. The page padding is symmetric on purpose: with a left
+      // padding only, the sticky bar starts where the scrolled content starts
+      // and the panel shows through on both sides.
+      const column = (children) => React.createElement('div', {
+        style: { padding: '18px 0 0', maxWidth: 720, boxSizing: 'border-box' },
+      }, React.createElement('div', { style: PAGE }, children));
 
       function toForm(values) {
         return {
@@ -1217,18 +1304,21 @@ window.__ModuleLoader__.load({
         );
 
         if (loading) {
-          return React.createElement('div', { style: PAGE },
-            React.createElement('div', { style: STATUS }, t('loading')));
+          return column([
+            React.createElement('div', { style: STATUS }, t('loading')),
+          ]);
         }
         if (form === null) {
-          return React.createElement('div', { style: PAGE },
-            React.createElement('div', { style: ERROR }, error === '' ? t('loadFailed') : error));
+          return column([
+            React.createElement('div', { style: ERROR }, error === '' ? t('loadFailed') : error),
+          ]);
         }
         if (!editable) {
-          return React.createElement('div', { style: PAGE },
+          return column([
             React.createElement('div', { style: TITLE }, t('settingsTitle')),
             React.createElement('div', { style: INTRO }, t('settingsIntro')),
-            React.createElement('div', { style: ERROR }, t('readOnly')));
+            React.createElement('div', { style: ERROR }, t('readOnly')),
+          ]);
         }
 
         const providerEntry = providers.find((entry) => entry.id === form.predictionProvider);
@@ -1267,19 +1357,23 @@ window.__ModuleLoader__.load({
             : []),
         ];
         const changeProvider = (value) => {
+          // "Follow the conversation's model" clears both fields, so the Host
+          // reports `source: session` and never treats a stale model as pinned.
           const entry = providers.find((provider) => provider.id === value);
           setForm((previous) => (previous === null ? previous : {
             ...previous,
             predictionProvider: value,
-            predictionModel: value === '' || entry === undefined || !Array.isArray(entry.models) || entry.models[0] === undefined
+            predictionModel: value === ''
               ? ''
-              : entry.models[0].id,
+              : (entry === undefined || !Array.isArray(entry.models) || entry.models[0] === undefined
+                ? ''
+                : entry.models[0].id),
           }));
           setSaved(false);
           setError('');
         };
 
-        return React.createElement('div', { style: PAGE },
+        return column([
           React.createElement('div', null,
             React.createElement('div', { style: TITLE }, t('settingsTitle')),
             React.createElement('div', { style: INTRO }, t('settingsIntro')),
@@ -1290,7 +1384,17 @@ window.__ModuleLoader__.load({
           ]),
           section(t('sectionModel'), [
             selectRow(t('predictionProviderLabel'), t('predictionProviderHint'), form.predictionProvider, providerOptions, changeProvider, false, 220),
-            selectRow(t('predictionModelLabel'), form.predictionProvider !== '' && models.length === 0 ? t('noModels') : '', form.predictionModel, modelOptions, (value) => update('predictionModel', value), form.predictionProvider === '' || models.length === 0, 220),
+            selectRow(
+              t('predictionModelLabel'),
+              form.predictionProvider === ''
+                ? t('predictionProviderHint')
+                : (models.length === 0 ? t('noModels') : t('predictionModelHint')),
+              form.predictionModel,
+              modelOptions,
+              (value) => update('predictionModel', value),
+              form.predictionProvider === '' || models.length === 0,
+              220,
+            ),
             inputRow(t('maxTokensLabel'), '', 'maxTokens', true),
             inputRow(t('timeoutLabel'), '', 'timeoutMs', true),
           ]),
@@ -1304,18 +1408,20 @@ window.__ModuleLoader__.load({
               type: 'button',
               disabled: saving,
               onClick: save,
-              style: saving ? { ...PRIMARY, opacity: 0.6, cursor: 'default' } : PRIMARY,
-            }, saving ? t('saving') : t('save')),
+              'aria-label': saving ? t('saving') : t('save'),
+              style: saving ? { ...COMPACT_PRIMARY, opacity: 0.6, cursor: 'default' } : COMPACT_PRIMARY,
+            }, saving ? React.createElement('span', { style: PRIMARY_LABEL }, t('saving')) : React.createElement('span', { style: PRIMARY_LABEL }, t('save'))),
             React.createElement('button', {
               type: 'button',
               disabled: saving,
               onClick: reset,
-              style: saving ? { ...BUTTON, opacity: 0.6, cursor: 'default' } : BUTTON,
-            }, t('reset')),
-            saved ? React.createElement('span', { style: STATUS }, t('saved')) : null,
+              'aria-label': t('reset'),
+              style: saving ? { ...COMPACT_SECONDARY, opacity: 0.6, cursor: 'default' } : COMPACT_SECONDARY,
+            }, React.createElement('span', { style: SECONDARY_LABEL }, t('reset'))),
+            saved ? React.createElement('span', { style: STATUS, role: 'status' }, t('saved')) : null,
             error !== '' ? React.createElement('span', { role: 'alert', style: ERROR }, error) : null,
           ),
-        );
+        ]);
       };
     }
 
@@ -1332,9 +1438,10 @@ window.__ModuleLoader__.load({
             fallback: '预测',
             announce: '有可用的下一步输入预测，按 Tab 采纳。',
             announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
-            settingsTab: '下一步输入',
-            settingsTitle: '下一步输入预测',
-            settingsIntro: '修改会应用到下一次预测；配置保存在 DSH 用户数据里。',
+            settingsNav: 'NextInput',
+            settingsTab: 'NextInput',
+            settingsTitle: 'NextInput',
+            settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
             sectionPrediction: '预测',
             sectionModel: '模型与延迟',
             sectionContext: '上下文与输出',
@@ -1343,8 +1450,9 @@ window.__ModuleLoader__.load({
             predictOnActivateLabel: '打开会话时预生成',
             predictOnActivateHint: '当前回答没有缓存时，打开会话会生成一次预测；会多一次模型调用。',
             predictionProviderLabel: '预测 provider',
-            predictionProviderHint: '两项都留空表示复用最近回答的路由。',
+            predictionProviderHint: '默认跟随当前对话中选中的模型（取不到时用产生最后一条回答的模型）。只有想固定一个更快、专用的模型时才需要选择。',
             predictionModelLabel: '预测 model',
+            predictionModelHint: '仅在上一项选了 provider 时生效。',
             maxTokensLabel: '最大输出 token',
             timeoutLabel: '超时（毫秒）',
             maxContextCharsLabel: '最大上下文字符',
@@ -1358,7 +1466,7 @@ window.__ModuleLoader__.load({
             saveFailed: '无法保存配置。',
             loading: '加载中…',
             providerPair: 'provider 和 model 必须同时填写，或同时留空。',
-            automaticRoute: '使用最近回答的路由',
+            automaticRoute: '跟随当前对话的模型',
             selectModel: '选择模型',
             noModels: '没有可用模型',
             invalidNumber: '请输入 {min} 到 {max} 之间的整数。',
@@ -1372,9 +1480,10 @@ window.__ModuleLoader__.load({
             fallback: 'Prediction',
             announce: 'A next-input prediction is available. Press Tab to accept.',
             announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
-            settingsTab: 'Next input',
-            settingsTitle: 'Next input prediction',
-            settingsIntro: 'Changes apply to the next prediction. Values are stored in DSH user data.',
+            settingsNav: 'NextInput',
+            settingsTab: 'NextInput',
+            settingsTitle: 'NextInput',
+            settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
             sectionPrediction: 'Prediction',
             sectionModel: 'Model & latency',
             sectionContext: 'Context & output',
@@ -1383,8 +1492,9 @@ window.__ModuleLoader__.load({
             predictOnActivateLabel: 'Predict on session open',
             predictOnActivateHint: 'When no cached prediction exists, opening a session generates one. Costs one model call.',
             predictionProviderLabel: 'Prediction provider',
-            predictionProviderHint: 'Leave both empty to reuse the latest answer’s route.',
+            predictionProviderHint: 'Default: follow the model selected in each conversation (falling back to the model that produced the last answer). Pick a route only to pin a dedicated, faster model.',
             predictionModelLabel: 'Prediction model',
+            predictionModelHint: 'Only used with a provider picked above.',
             maxTokensLabel: 'Max output tokens',
             timeoutLabel: 'Timeout (ms)',
             maxContextCharsLabel: 'Max context characters',
@@ -1398,7 +1508,7 @@ window.__ModuleLoader__.load({
             saveFailed: 'Could not save settings.',
             loading: 'Loading…',
             providerPair: 'Set both provider and model, or leave both empty.',
-            automaticRoute: 'Use latest answer’s route',
+            automaticRoute: 'Follow the conversation’s model',
             selectModel: 'Select a model',
             noModels: 'No models advertised',
             invalidNumber: 'Enter a whole number between {min} and {max}.',
@@ -1406,15 +1516,57 @@ window.__ModuleLoader__.load({
           }), 'next-input: en dictionary');
         }
 
+        const label = (key) => () => {
+          const current = ctx.get('locale');
+          return current === undefined || current === null ? (FALLBACK[key] || key) : current.bind(NS)(key);
+        };
+
+        // Settings → Plugins keeps a tab under the plugin's row.
         ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
           name: 'settings.plugins.tab',
           id: 'next-input',
           order: 50,
-          label: () => {
-            const current = ctx.get('locale');
-            return current === undefined || current === null ? 'Next input' : current.bind(NS)('settingsTab');
-          },
+          label: label('settingsTab'),
         }, createSettingsPage(ctx)));
+
+        // Settings nav: a top-level section named after the plugin, so it is
+        // obvious which plugin the page belongs to.
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'next-input',
+          order: 60,
+          label: label('settingsNav'),
+        }, createSettingsPage(ctx)));
+
+        ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+          name: 'settings.section.icon',
+          id: 'next-input',
+          order: 60,
+          label: label('settingsNav'),
+        }, (props) => {
+          const size = props !== null && props !== undefined && typeof props.size === 'number' ? props.size : 16;
+          return React.createElement('svg', {
+            width: size,
+            height: size,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': 'true',
+          },
+          React.createElement('path', {
+            d: 'M2.5 8h7.5M7 4.5 10.5 8 7 11.5',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+          React.createElement('path', {
+            d: 'M13 3v10',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            opacity: 0.45,
+          }));
+        }));
 
         ctx.slots.inject('conversation.input.overlay', () => ctx.slots.register({
           name: 'conversation.input.overlay',
@@ -1424,7 +1576,7 @@ window.__ModuleLoader__.load({
       },
     };
     if (typeof window !== 'undefined' && window.__DSH_NEXT_INPUT_TEST__ === true) {
-      api.__test = { readConversation };
+      api.__test = { readConversation, readSelection };
     }
     return api;
   },

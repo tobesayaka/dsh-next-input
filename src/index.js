@@ -12,6 +12,15 @@ import { dirname, join } from 'node:path';
  * The route is registered on Connection's shared `/api` handler, so it inherits
  * the browser cookie, Host/Origin checks, and Peer admission. No model content
  * is logged to the session: this is an ephemeral suggestion, not agent context.
+ *
+ * Route selection (`resolveRoute`): an explicit provider/model pair in the
+ * settings file wins; otherwise the prediction follows the model the Session
+ * has selected (the browser reads the `modelSelection` projection and sends
+ * it), falling back to the route that produced the last answer. The `purpose`
+ * below is not the agent's own request, so `request/header` events keep
+ * `modelSelection.lastUsed` — the Session's model picker — untouched.
+ * The central route handler does not wrap the injected `ctx` out of the box
+ * (that is a dynamic-package sandbox concern); this half stays plain cordis.
  */
 
 const DEFAULTS = {
@@ -26,13 +35,54 @@ const DEFAULTS = {
   /** Wall-clock bound for one prediction. */
   timeoutMs: 20000,
   /** Let plain Enter accept the ghost and submit it immediately. */
-  enterToSend: false,
+  enterToSend: true,
   /** Generate a missing prediction when a Session is opened. */
-  predictOnActivate: false,
-  /** Optional faster route for predictions; both fields must be set. */
+  predictOnActivate: true,
+  /**
+   * Optional fixed route for predictions; both fields must be set. Left empty,
+   * each prediction follows the Session's selected model, then the route that
+   * produced its last answer.
+   */
   predictionProvider: '',
   predictionModel: '',
 };
+
+/**
+ * Pick the provider/model one prediction calls.
+ *
+ * Precedence: the settings file's explicit route, then the model the Session
+ * has selected (sent by the browser from the `modelSelection` projection),
+ * then the route that produced the last answer. The last answer's route is used
+ * when no selection was sent, or when the selected provider is not registered;
+ * the result then carries `fallback: true`.
+ * @param {{ predictionProvider: string, predictionModel: string }} options
+ * @param {{ provider: string, model: string } | undefined} selection
+ * @param {{ provider: string, model: string }} answerRoute
+ * @param {ReadonlyArray<{ id: string }>} providers
+ * @returns {{ provider: string, model: string, source: 'settings' | 'session' | 'answer', fallback?: boolean }}
+ */
+export function resolveRoute(options, selection, answerRoute, providers) {
+  if (options.predictionProvider !== '' && options.predictionModel !== '') {
+    return {
+      provider: options.predictionProvider,
+      model: options.predictionModel,
+      source: 'settings',
+    };
+  }
+  const selected = selection === null || selection === undefined ? undefined : selection;
+  if (selected !== undefined && selected.provider !== '' && selected.model !== ''
+    && providers.some((entry) => entry.id === selected.provider)) {
+    return { provider: selected.provider, model: selected.model, source: 'session' };
+  }
+  return {
+    provider: answerRoute.provider,
+    model: answerRoute.model,
+    source: 'answer',
+    ...(selected !== undefined && selected.provider !== '' && selected.model !== ''
+      ? { fallback: true }
+      : {}),
+  };
+}
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_LIMIT = 100;
@@ -249,10 +299,18 @@ function packMessages(all, options) {
 
 /** @param {unknown} body @param {typeof DEFAULTS} options */
 function normalizeInput(body, options) {
+  // The answer's own route stays required: it is the last fallback. `selection`
+  // is optional — the browser sends the model its Session has selected now.
   if (body === null || typeof body !== 'object') return { error: 'invalid_body' };
   const provider = typeof body.provider === 'string' ? body.provider.trim() : '';
   const model = typeof body.model === 'string' ? body.model.trim() : '';
   if (provider === '' || model === '') return { error: 'missing_model' };
+  const selection = body.selection === null || typeof body.selection !== 'object'
+    ? undefined
+    : {
+      provider: typeof body.selection.provider === 'string' ? body.selection.provider.trim() : '',
+      model: typeof body.selection.model === 'string' ? body.selection.model.trim() : '',
+    };
   const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
   if (sessionId === '') return { error: 'missing_session' };
   const answerKey = typeof body.answerKey === 'string' ? body.answerKey.trim() : '';
@@ -272,7 +330,7 @@ function normalizeInput(body, options) {
 
   const messages = packMessages(all, options);
   if (!messages.some((message) => message.role === 'assistant')) return { error: 'missing_answer' };
-  return { provider, model, sessionId, answerKey, messages };
+  return { provider, model, selection, sessionId, answerKey, messages };
 }
 
 /** @param {Array<{ role: string, text: string }>} messages */
@@ -311,10 +369,10 @@ async function predict(ctx, options, state, request) {
   // a stale or buggy client from spending tokens on an arbitrary provider.
   const session = typeof ctx.sessions.get === 'function' ? ctx.sessions.get(input.sessionId) : undefined;
   if (session === undefined) return json({ error: 'unknown_session' }, 404);
-  const usePredictionRoute = options.predictionProvider !== '' && options.predictionModel !== '';
-  const provider = usePredictionRoute ? options.predictionProvider : input.provider;
-  const model = usePredictionRoute ? options.predictionModel : input.model;
   const providers = typeof ctx.llm.listProviders === 'function' ? ctx.llm.listProviders() : [];
+  const route = resolveRoute(options, input.selection, { provider: input.provider, model: input.model }, providers);
+  const provider = route.provider;
+  const model = route.model;
   if (!providers.some((entry) => entry.id === provider)) {
     return json({ error: 'unknown_provider' }, 400);
   }
@@ -416,6 +474,7 @@ async function predict(ctx, options, state, request) {
     suggestion,
     ...(truncated ? { truncated: true } : {}),
     ...(options.enterToSend ? { enterToSend: true } : {}),
+    route,
   });
 }
 
@@ -501,8 +560,20 @@ async function providerCatalog(ctx) {
 
 /** @param {import('cordis').Context} ctx @param {Record<string, any>} options @param {Record<string, any>} baseOptions @param {string} file @param {Request} request */
 async function settingsRoute(ctx, options, baseOptions, file, request) {
+  // `source` tells the page whether the prediction route is pinned in the
+  // settings file or follows each Session's selected model.
+  const route = () => ({
+    source: options.predictionProvider !== '' && options.predictionModel !== '' ? 'settings' : 'session',
+  });
   if (request.method === 'GET') {
-    return json({ values: options, defaults: baseOptions, editable: true, path: file, providers: await providerCatalog(ctx) });
+    return json({
+      values: options,
+      defaults: baseOptions,
+      editable: true,
+      path: file,
+      providers: await providerCatalog(ctx),
+      route: route(),
+    });
   }
   let body;
   try {
@@ -517,7 +588,7 @@ async function settingsRoute(ctx, options, baseOptions, file, request) {
       return json({ error: 'settings_reset_failed' }, 500);
     }
     Object.assign(options, baseOptions);
-    return json({ values: options, defaults: baseOptions, editable: true, path: file, saved: true });
+    return json({ values: options, defaults: baseOptions, editable: true, path: file, saved: true, route: route() });
   }
   const normalized = normalizeSettings(body === null || typeof body !== 'object' ? undefined : body.values, options);
   if (normalized.error !== undefined) {
@@ -529,7 +600,7 @@ async function settingsRoute(ctx, options, baseOptions, file, request) {
     return json({ error: 'settings_write_failed' }, 500);
   }
   Object.assign(options, normalized.values);
-  return json({ values: options, defaults: baseOptions, editable: true, path: file, saved: true });
+  return json({ values: options, defaults: baseOptions, editable: true, path: file, saved: true, route: route() });
 }
 
 /** Host plugin entry. @param {import('cordis').Context} ctx */

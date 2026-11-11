@@ -1,7 +1,7 @@
 {
   "meta": {
-    "title": "下一步输入预测",
-    "description": "回答结束后预测你的下一句话，以浅色文字预填在输入框内；按 Tab 采纳。"
+    "title": "NextInput",
+    "description": "回答结束后预测你的下一句话，以浅色文字预填在输入框内；按 Tab 采纳，默认 Enter 采纳并发送。"
   },
   "tab": "Tab",
   "hint": "按 Tab 采纳这则预测"
