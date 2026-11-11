@@ -86,6 +86,7 @@ export function resolveRoute(options, selection, answerRoute, providers) {
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_LIMIT = 100;
+const USAGE_RECENT_LIMIT = 20;
 
 const SETTINGS_LIMITS = {
   maxSuggestionChars: [20, 500],
@@ -197,6 +198,93 @@ function cacheGet(cache, sessionId, answerKey) {
   }
   if (entry.answerKey !== answerKey) return undefined;
   return entry;
+}
+
+/**
+ * Token counts reported by the provider for one prediction call. Only
+ * primitives are kept, and only when the provider reported a usage chunk.
+ * @param {unknown} chunk
+ * @returns {{ inputTokens: number, outputTokens: number, totalTokens: number, cacheReadTokens: number } | undefined}
+ */
+function readUsage(chunk) {
+  const usage = chunk === null || chunk === undefined ? undefined : chunk.usage;
+  if (usage === null || typeof usage !== 'object') return undefined;
+  const count = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : 0);
+  const inputTokens = count(usage.inputTokens);
+  const outputTokens = count(usage.outputTokens);
+  const totalTokens = count(usage.totalTokens) > 0 ? count(usage.totalTokens) : inputTokens + outputTokens;
+  const cacheReadTokens = count(usage.cacheReadTokens);
+  if (totalTokens === 0) return undefined;
+  return { inputTokens, outputTokens, totalTokens, cacheReadTokens };
+}
+
+/**
+ * Accumulate one completed prediction into the in-process counters. Nothing is
+ * persisted: counts live and die with the Host process, like the cache.
+ * @param {{ usage: Record<string, any> }} state
+ * @param {{ provider: string, model: string, source: string }} route
+ * @param {{ inputTokens: number, outputTokens: number, totalTokens: number, cacheReadTokens: number } | undefined} usage
+ * @param {number} ms
+ */
+function recordUsage(state, route, usage, ms) {
+  const summary = state.usage;
+  summary.calls += 1;
+  summary.ms += ms;
+  if (usage === undefined) {
+    summary.withoutUsage += 1;
+  } else {
+    summary.callsWithUsage += 1;
+    summary.inputTokens += usage.inputTokens;
+    summary.outputTokens += usage.outputTokens;
+    summary.totalTokens += usage.totalTokens;
+    summary.cacheReadTokens += usage.cacheReadTokens;
+  }
+  // One row per model route (`provider/model`), so the page can show where
+  // tokens went without storing credentials or session text.
+  const id = route.provider + '/' + route.model;
+  if (!summary.byRoute.has(id)) summary.byRoute.set(id, { calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+  const entry = summary.byRoute.get(id);
+  entry.calls += 1;
+  if (usage !== undefined) {
+    entry.inputTokens += usage.inputTokens;
+    entry.outputTokens += usage.outputTokens;
+    entry.totalTokens += usage.totalTokens;
+  }
+  summary.recent.push({
+    at: Date.now(),
+    provider: route.provider,
+    model: route.model,
+    source: route.source,
+    ...(usage === undefined
+      ? {}
+      : { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens }),
+    ms,
+  });
+  while (summary.recent.length > USAGE_RECENT_LIMIT) summary.recent.shift();
+}
+
+/**
+ * Count the model calls that actually started (usage) and the ones this route
+ * refused because the same answer was already being predicted. Free outcomes
+ * (cache hits, validation failures) never reach the provider.
+ * @param {{ usage: Record<string, any> }} state
+ */
+function usageReport(state) {
+  const { usage } = state;
+  return {
+    calls: usage.calls,
+    callsWithUsage: usage.callsWithUsage,
+    withoutUsage: usage.withoutUsage,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    cacheReadTokens: usage.cacheReadTokens,
+    ms: usage.ms,
+    answered: usage.answered,
+    duplicate: usage.duplicate,
+    byRoute: [...usage.byRoute].map(([id, entry]) => ({ id, ...entry })),
+    recent: usage.recent.slice(-USAGE_RECENT_LIMIT),
+  };
 }
 
 const SYSTEM_PROMPT = `You are the next-message predictor inside a chat between a user and an AI coding assistant.
@@ -377,7 +465,19 @@ async function predict(ctx, options, state, request) {
     return json({ error: 'unknown_provider' }, 400);
   }
 
+  // Two clients can race one answer (two tabs, a remount, a reload). Only the
+  // first may spend tokens; the rest get the cached entry or a refusal.
+  const requestKey = input.sessionId + '|' + input.answerKey;
+  if (input.answerKey !== '' && state.inflight.has(requestKey)) {
+    state.usage.duplicate += 1;
+    return json({ error: 'in_flight' }, 429);
+  }
+
+  // Claim both guards before the first await below, so a duplicate that arrives
+  // while this one streams is refused instead of spending tokens twice.
   if (activeSessions.has(input.sessionId)) return json({ error: 'in_flight' }, 429);
+  activeSessions.add(input.sessionId);
+  if (input.answerKey !== '') state.inflight.add(requestKey);
 
   const controller = new AbortController();
   let timedOut = false;
@@ -389,10 +489,11 @@ async function predict(ctx, options, state, request) {
   if (request.signal.aborted) controller.abort();
   else request.signal.addEventListener('abort', forwardAbort, { once: true });
 
-  activeSessions.add(input.sessionId);
+  const startedAt = Date.now();
   let failure = null;
   let truncated = false;
   let text = '';
+  let usage;
   try {
     // Reasoning models can spend a tiny output budget entirely on hidden
     // reasoning. Prepare the call with the least advertised effort and a real
@@ -430,6 +531,9 @@ async function predict(ctx, options, state, request) {
     })) {
       if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
         text += chunk.text;
+      } else if (chunk.type === 'usage') {
+        const reported = readUsage(chunk);
+        if (reported !== undefined) usage = reported;
       } else if (chunk.type === 'finish'
         && chunk.reason !== null
         && chunk.reason !== undefined) {
@@ -451,6 +555,8 @@ async function predict(ctx, options, state, request) {
     clearTimeout(timer);
     request.signal.removeEventListener('abort', forwardAbort);
     activeSessions.delete(input.sessionId);
+    if (input.answerKey !== '') state.inflight.delete(requestKey);
+    recordUsage(state, route, usage, Date.now() - startedAt);
   }
 
   if (failure !== null) {
@@ -463,6 +569,7 @@ async function predict(ctx, options, state, request) {
   const suggestion = cleanSuggestion(text, options.maxSuggestionChars);
   if (suggestion === '' && truncated) return json({ error: 'max_tokens' }, 502);
   if (suggestion !== '' && input.answerKey !== '') {
+    state.usage.answered += 1;
     cacheSet(state.cache, input.sessionId, {
       answerKey: input.answerKey,
       text: suggestion,
@@ -559,13 +666,15 @@ async function providerCatalog(ctx) {
 }
 
 /** @param {import('cordis').Context} ctx @param {Record<string, any>} options @param {Record<string, any>} baseOptions @param {string} file @param {Request} request */
-async function settingsRoute(ctx, options, baseOptions, file, request) {
+async function settingsRoute(ctx, options, baseOptions, file, request, state) {
   // `source` tells the page whether the prediction route is pinned in the
   // settings file or follows each Session's selected model.
   const route = () => ({
     source: options.predictionProvider !== '' && options.predictionModel !== '' ? 'settings' : 'session',
   });
   if (request.method === 'GET') {
+    const url = new URL(request.url);
+    if (url.searchParams.get('usage') === '1') return json({ usage: usageReport(state) });
     return json({
       values: options,
       defaults: baseOptions,
@@ -573,6 +682,7 @@ async function settingsRoute(ctx, options, baseOptions, file, request) {
       path: file,
       providers: await providerCatalog(ctx),
       route: route(),
+      usage: usageReport(state),
     });
   }
   let body;
@@ -580,6 +690,24 @@ async function settingsRoute(ctx, options, baseOptions, file, request) {
     body = await request.json();
   } catch {
     return json({ error: 'invalid_json' }, 400);
+  }
+  if (body !== null && typeof body === 'object' && body.resetUsage === true) {
+    const { usage } = state;
+    Object.assign(usage, {
+      calls: 0,
+      callsWithUsage: 0,
+      withoutUsage: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      ms: 0,
+      answered: 0,
+      duplicate: 0,
+    });
+    usage.byRoute.clear();
+    usage.recent.length = 0;
+    return json({ usage: usageReport(state), reset: true });
   }
   if (body !== null && typeof body === 'object' && body.reset === true) {
     try {
@@ -627,13 +755,38 @@ export function apply(ctx, config = {}) {
   if (storedSettings !== undefined) Object.assign(options, storedSettings);
 
   ctx.effect(() => {
-    const state = { active: new Set(), cache: new Map() };
+    // `usage` is a plain counter object: process-lifetime only, never stored.
+    const state = {
+      active: new Set(),
+      inflight: new Set(),
+      cache: new Map(),
+      usage: {
+        calls: 0,
+        callsWithUsage: 0,
+        withoutUsage: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        cacheReadTokens: 0,
+        ms: 0,
+        answered: 0,
+        duplicate: 0,
+        byRoute: new Map(),
+        recent: [],
+      },
+    };
     const disposers = [
       ctx.connection.fetch.register({
         path: '/api/next-input.predict',
         methods: ['POST'],
         requestBody: 'buffered',
         fetch: (request) => predict(ctx, options, state, request),
+      }),
+      ctx.connection.fetch.register({
+        path: '/api/next-input.usage',
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: () => json({ usage: usageReport(state) }),
       }),
       ctx.connection.fetch.register({
         path: '/api/next-input.cached',
@@ -651,7 +804,7 @@ export function apply(ctx, config = {}) {
         path: '/api/next-input.settings',
         methods: ['GET', 'POST'],
         requestBody: 'buffered',
-        fetch: (request) => settingsRoute(ctx, options, baseOptions, settingsFile, request),
+        fetch: (request) => settingsRoute(ctx, options, baseOptions, settingsFile, request, state),
       }),
     ];
     return () => {

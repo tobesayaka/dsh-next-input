@@ -37,6 +37,17 @@ window.__ModuleLoader__.load({
       sectionPrediction: 'Prediction',
       sectionModel: 'Model & latency',
       sectionContext: 'Context & output',
+      sectionUsage: 'Usage (this Host session)',
+      usageCalls: 'Prediction calls',
+      usageTokens: 'Tokens used',
+      usageAverage: 'Avg per call',
+      usageInput: 'Input tokens',
+      usageOutput: 'Output tokens',
+      usageCacheRead: 'Cache-hit input',
+      usageServed: '{answered} answers served from the cache · {duplicate} duplicate requests refused',
+      usageNoReport: '({count} calls reported no token usage)',
+      usageScope: 'Counted by this plugin only, in Host process memory: a DSH restart clears it. Resetting the counters never deletes settings.',
+      usageReset: 'Reset counters',
       enterToSendLabel: 'Enter accepts and sends',
       enterToSendHint: 'Tab only accepts; plain Enter accepts and sends the prediction.',
       predictOnActivateLabel: 'Predict on session open',
@@ -68,6 +79,28 @@ window.__ModuleLoader__.load({
     const CSS = `
 [${GHOST_ATTR}] [data-composer-placeholder]{visibility:hidden !important}
 `;
+
+    // Session-scoped marks live on the HTML root (not localStorage): they
+    // vanish with the page and survive overlay remounts and HMR, so one answer
+    // triggers at most one model call per page. `tab`/`hit`/`routed` are
+    // settled states, `t0` marks a prediction that started at that time.
+    const SESSION_MARKS_ATTR = 'data-dsh-next-input';
+    // After a page reload nothing is remembered. Within this window an in-flight
+    // prediction cannot be back-filled (the Host finishes it and caches it), so
+    // a missing cache entry means it failed and must not be retried.
+    const RELOAD_GUARD_MS = 60000;
+
+    /** @param {string} text @returns {Record<string, number | string>} */
+    function readSessionMarks(text) {
+      const marks = {};
+      if (typeof text !== 'string' || text === '') return marks;
+      for (const part of text.split(';')) {
+        const separator = part.indexOf(':');
+        if (separator <= 0) continue;
+        marks[part.slice(0, separator)] = part.slice(separator + 1);
+      }
+      return marks;
+    }
 
     const CACHE_ROUTE = 'api/next-input.cached';
     const DISMISS_ROUTE = 'api/next-input.dismiss';
@@ -306,6 +339,15 @@ window.__ModuleLoader__.load({
       const lookupRef = React.useRef(null);
       const lookupInFlightRef = React.useRef(null);
       const dismissedRef = React.useRef(null);
+      // `sessionId|answerKey` pairs that already consumed a model call in this
+      // page (or were settled after it). Mirrored on the HTML root so the
+      // marks outlive an overlay remount, which a per-mount ref cannot.
+      const requestedRef = React.useRef(new Set());
+      // Same marks as history.replaceState patches: no server request and no
+      // history entries; cleared by a page reload.
+      const routeRef = React.useRef(null);
+      // Window-behind retries for one scheduled prediction; reset on schedule.
+      const attemptsRef = React.useRef(0);
 
       const [suggestion, setSuggestion] = React.useState(null);
       const [box, setBox] = React.useState(null);
@@ -340,9 +382,41 @@ window.__ModuleLoader__.load({
         setSuggestion(null);
       };
 
+      const readMarks = () => {
+        const route = routeRef.current;
+        if (route !== null) return route;
+        try {
+          const root = document.documentElement;
+          return readSessionMarks(root === null || root === undefined ? '' : root.getAttribute(SESSION_MARKS_ATTR));
+        } catch {
+          return {};
+        }
+      };
+
+      /** Merge `patch` into the page's Session marks. Never throws. */
+      const mark = (patch) => {
+        try {
+          const merged = { ...readMarks(), ...patch };
+          // Keep the attribute short: history.replaceState patches treat it as
+          // page state, and only the latest answer matters.
+          for (const name of ['hit', 'routed', 'tab', 'key']) {
+            if (merged[name] !== patch[name] && merged[name] !== undefined) delete merged[name];
+          }
+          Object.assign(merged, patch);
+          routeRef.current = merged;
+          const root = document === undefined ? undefined : document.documentElement;
+          if (root === null || root === undefined || typeof root.setAttribute !== 'function') return;
+          const text = Object.entries(merged).map(([name, value]) => name + ':' + value).join(';');
+          root.setAttribute(SESSION_MARKS_ATTR, text);
+        } catch {
+          // Marks are an optimisation; a missing DOM must never break the ghost.
+        }
+      };
+
       const dismissPrediction = (session, answerKey) => {
         if (session === undefined || session === null || answerKey === undefined || answerKey === null || answerKey === '') return;
         dismissedRef.current = session + '|' + answerKey;
+        mark({ tab: session + '|' + answerKey });
         void fetch(DISMISS_ROUTE, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -420,7 +494,7 @@ window.__ModuleLoader__.load({
         window.requestAnimationFrame(() => submitDraft(0));
       };
 
-      const generate = async (attempt = 0) => {
+      const generate = async () => {
         if (!mountedRef.current) return;
         if (draftRef.current !== '' || runningRef.current || phaseRef.current !== 'plain') return;
         const sessions = ctx.get('sessions');
@@ -431,11 +505,20 @@ window.__ModuleLoader__.load({
         const selection = readSelection(sessions, session);
         const last = conversation.messages[conversation.messages.length - 1];
         // The event window can trail the running flag by a frame; retry briefly
-        // instead of dropping the turn.
+        // instead of dropping the turn. The attempt budget belongs to one
+        // schedule() call, so a lagging window cannot re-arm it forever.
         if (conversation.model === null || last === undefined || last.role !== 'assistant') {
-          if (attempt < 3) schedule(150, attempt + 1);
+          attemptsRef.current += 1;
+          if (attemptsRef.current <= 3) schedule(150);
           return;
         }
+        // One answer, one model call per page: remounts and route effects that
+        // repeat for the same answer must not spend tokens again.
+        const answerId = session + '|' + (conversation.answerKey ?? '');
+        const marks = readMarks();
+        if (requestedRef.current.has(answerId) || marks.hit === answerId) return;
+        requestedRef.current.add(answerId);
+        mark({ t0: String(Date.now()), key: answerId });
 
         const seq = requestSeqRef.current + 1;
         requestSeqRef.current = seq;
@@ -465,6 +548,9 @@ window.__ModuleLoader__.load({
           if (!mountedRef.current || seq !== requestSeqRef.current) return;
           if (draftRef.current !== '' || runningRef.current || phaseRef.current !== 'plain') return;
           if (sessionRef.current !== session) return;
+          // Any answered call was cached by the Host; a later reload will
+          // restore it, so the guard must not block that.
+          if (conversation.answerKey !== null) mark({ hit: session + '|' + conversation.answerKey });
           const text = data !== null && data !== undefined && typeof data.suggestion === 'string'
             ? data.suggestion.trim()
             : '';
@@ -485,11 +571,12 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const schedule = (delay, attempt = 0) => {
+      const schedule = (delay) => {
         clearTimer();
+        attemptsRef.current = 0;
         timerRef.current = window.setTimeout(() => {
           timerRef.current = 0;
-          void generate(attempt);
+          void generate();
         }, delay);
       };
 
@@ -516,6 +603,16 @@ window.__ModuleLoader__.load({
           return;
         }
         if (previous.running && draftRef.current === '' && phaseRef.current === 'plain') {
+          const conversation = readConversation(ctx.get('sessions'), sessionId);
+          const answerId = conversation.answerKey === null ? null : sessionId + '|' + conversation.answerKey;
+          const marks = readMarks();
+          if (answerId !== null && (marks.routed === answerId || marks.hit === answerId)) {
+            // Already handled in this page (switch away and back, remount, or a
+            // previous activation lookup): the restore effect shows the ghost.
+            mark({ routed: answerId });
+            return;
+          }
+          if (answerId !== null) mark({ routed: answerId });
           schedule(SETTLE_DELAY_MS);
         }
       }, [running, sessionId]);
@@ -545,6 +642,16 @@ window.__ModuleLoader__.load({
         restoreRetryRef.current = 0;
         const key = sessionId + '|' + conversation.answerKey;
         if (dismissedRef.current === key) return undefined;
+        const marks = readMarks();
+        if (marks.hit === key && marks.tab === key) {
+          // Accepted after a prediction in this page: the Host holds the
+          // dismissal tombstone, so there is nothing to restore or generate.
+          return undefined;
+        }
+        // A prediction that started in the previous page cannot be back-filled:
+        // the Host finishes it and caches it before its client gives up ~25s in.
+        const startedAt = marks.key === key ? Number(marks.t0) : NaN;
+        if (Number.isFinite(startedAt) && Date.now() - startedAt < RELOAD_GUARD_MS) return undefined;
         if (lookupRef.current === key || lookupInFlightRef.current === key) return undefined;
         // The turn-end path already schedules or runs a prediction; do not
         // duplicate it with an activation lookup.
@@ -570,7 +677,10 @@ window.__ModuleLoader__.load({
               return;
             }
             if (data !== null && data.dismissed === true) return;
-            if (data !== null && data.predictOnActivate === true) schedule(50);
+            if (data !== null && data.predictOnActivate === true) {
+              mark({ routed: key });
+              schedule(50);
+            }
           } catch (error) {
             if (error === null || error === undefined || error.name !== 'AbortError') {
               console.debug('next-input: cache lookup failed', error);
@@ -1036,6 +1146,24 @@ window.__ModuleLoader__.load({
       };
       const COMPACT_SECONDARY = { ...SECONDARY, padding: '0 12px' };
       const SECONDARY_LABEL = { color: 'inherit', whiteSpace: 'nowrap' };
+      const ACTIONS_INLINE = { display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6 };
+      const USAGE_GRID = {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+        gap: 8,
+        padding: '8px 0 10px',
+      };
+      const USAGE_CELL = {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+        padding: '8px 10px',
+        borderRadius: 8,
+        background: 'var(--dsw-alias-bg-layer-2)',
+        border: '0.5px solid var(--dsw-alias-border-l1)',
+      };
+      const USAGE_ROUTES = { display: 'flex', flexDirection: 'column', gap: 2 };
+      const USAGE_LABEL = { fontSize: 11.5, lineHeight: '16px', color: 'var(--dsw-alias-label-secondary)' };
       const STATUS = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' };
       const ERROR = { ...STATUS, color: 'var(--dsw-alias-state-error-primary, var(--dsw-alias-label-primary))' };
 
@@ -1098,6 +1226,7 @@ window.__ModuleLoader__.load({
         const [editable, setEditable] = React.useState(true);
         const [error, setError] = React.useState('');
         const [saved, setSaved] = React.useState(false);
+        const [usage, setUsage] = React.useState(null);
 
         React.useEffect(() => {
           const controller = new AbortController();
@@ -1115,6 +1244,7 @@ window.__ModuleLoader__.load({
               setForm(toForm(data.values));
               setProviders(Array.isArray(data.providers) ? data.providers : []);
               setEditable(data.editable !== false);
+              setUsage(data.usage === null || data.usage === undefined ? null : data.usage);
               setLoading(false);
             } catch (failure) {
               if (cancelled || (failure !== null && failure !== undefined && failure.name === 'AbortError')) return;
@@ -1218,6 +1348,83 @@ window.__ModuleLoader__.load({
           } finally {
             setSaving(false);
           }
+        };
+
+        const resetUsage = async () => {
+          setSaving(true);
+          setError('');
+          try {
+            const response = await fetch(SETTINGS_ROUTE, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ resetUsage: true }),
+            });
+            const data = await response.json().catch(() => null);
+            if (!response.ok || data === null) {
+              setError(t('saveFailed'));
+              return;
+            }
+            setUsage(data.usage === null || data.usage === undefined ? null : data.usage);
+          } catch {
+            setError(t('saveFailed'));
+          } finally {
+            setSaving(false);
+          }
+        };
+
+        const formatNumber = (value) => (typeof value === 'number' && Number.isFinite(value)
+          ? value.toLocaleString()
+          : '0');
+        const formatSeconds = (value) => (typeof value === 'number' && Number.isFinite(value)
+          ? (value / 1000).toFixed(1) + 's'
+          : '0s');
+
+        const usageSection = () => {
+          if (usage === null) return null;
+          const calls = typeof usage.calls === 'number' ? usage.calls : 0;
+          const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : 0;
+          const inputTokens = typeof usage.inputTokens === 'number' ? usage.inputTokens : 0;
+          const outputTokens = typeof usage.outputTokens === 'number' ? usage.outputTokens : 0;
+          const cacheReadTokens = typeof usage.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0;
+          const answered = typeof usage.answered === 'number' ? usage.answered : 0;
+          const duplicate = typeof usage.duplicate === 'number' ? usage.duplicate : 0;
+          const withoutUsage = typeof usage.withoutUsage === 'number' ? usage.withoutUsage : 0;
+          const averageMs = calls === 0 ? 0 : (typeof usage.ms === 'number' ? usage.ms : 0) / calls;
+          const averageTokens = calls === 0 ? 0 : totalTokens / calls;
+          const value = (label, text) => React.createElement('div', { style: USAGE_CELL },
+            React.createElement('div', { style: USAGE_LABEL }, label),
+            React.createElement('div', { style: LABEL }, text));
+          return section(t('sectionUsage'), [
+            React.createElement('div', { style: USAGE_GRID },
+              value(t('usageCalls'), formatNumber(calls)),
+              value(t('usageTokens'), formatNumber(totalTokens)),
+              value(t('usageAverage'), formatNumber(Math.round(averageTokens)) + ' · ' + formatSeconds(averageMs))),
+            React.createElement('div', { style: USAGE_GRID },
+              value(t('usageInput'), formatNumber(inputTokens)),
+              value(t('usageOutput'), formatNumber(outputTokens)),
+              value(t('usageCacheRead'), formatNumber(cacheReadTokens))),
+            React.createElement('div', { style: HINT },
+              t('usageServed')
+                .replace('{answered}', formatNumber(answered))
+                .replace('{duplicate}', formatNumber(duplicate))
+                + (withoutUsage > 0 ? ' ' + t('usageNoReport').replace('{count}', formatNumber(withoutUsage)) : '')),
+            ...(Array.isArray(usage.byRoute) && usage.byRoute.length > 0
+              ? [React.createElement('div', { key: 'routes', style: USAGE_ROUTES },
+                usage.byRoute.map((entry) => React.createElement('span', { key: entry.id, style: HINT },
+                  (entry.id === undefined || entry.id === null ? '' : String(entry.id))
+                    + ' · ' + formatNumber(entry.calls)
+                    + ' · ' + formatNumber(entry.totalTokens) + ' ' + t('usageTokens'))))]
+              : []),
+            React.createElement('div', { style: HINT }, t('usageScope')),
+            React.createElement('div', { style: ACTIONS_INLINE },
+              React.createElement('button', {
+                type: 'button',
+                disabled: saving,
+                onClick: resetUsage,
+                'aria-label': t('usageReset'),
+                style: saving ? { ...SECONDARY, opacity: 0.6, cursor: 'default' } : SECONDARY,
+              }, React.createElement('span', { style: SECONDARY_LABEL }, t('usageReset')))),
+          ]);
         };
 
         const toggle = (label, checked, onToggle) => React.createElement('button', {
@@ -1403,6 +1610,7 @@ window.__ModuleLoader__.load({
             inputRow(t('maxMessagesLabel'), '', 'maxMessages', true),
             inputRow(t('maxSuggestionCharsLabel'), '', 'maxSuggestionChars', true),
           ]),
+          usageSection(),
           React.createElement('div', { style: ACTIONS },
             React.createElement('button', {
               type: 'button',
@@ -1445,6 +1653,17 @@ window.__ModuleLoader__.load({
             sectionPrediction: '预测',
             sectionModel: '模型与延迟',
             sectionContext: '上下文与输出',
+            sectionUsage: '用量（本次 Host 运行）',
+            usageCalls: '预测调用次数',
+            usageTokens: '消耗 token',
+            usageAverage: '平均每次',
+            usageInput: '输入 token',
+            usageOutput: '输出 token',
+            usageCacheRead: '命中缓存的输入',
+            usageServed: '缓存直接命中 {answered} 次 · 拒绝重复请求 {duplicate} 次',
+            usageNoReport: '（{count} 次调用未返回 token 用量）',
+            usageScope: '只统计本插件在 Host 进程内存里的计数，DSH 重启后清零；“重置计数”不会改动任何设置。',
+            usageReset: '重置计数',
             enterToSendLabel: 'Enter 采纳并发送',
             enterToSendHint: 'Tab 只采纳；普通 Enter 会采纳并发送预测。',
             predictOnActivateLabel: '打开会话时预生成',
@@ -1487,6 +1706,17 @@ window.__ModuleLoader__.load({
             sectionPrediction: 'Prediction',
             sectionModel: 'Model & latency',
             sectionContext: 'Context & output',
+            sectionUsage: 'Usage (this Host session)',
+            usageCalls: 'Prediction calls',
+            usageTokens: 'Tokens used',
+            usageAverage: 'Avg per call',
+            usageInput: 'Input tokens',
+            usageOutput: 'Output tokens',
+            usageCacheRead: 'Cache-hit input',
+            usageServed: '{answered} answers served from the cache · {duplicate} duplicate requests refused',
+            usageNoReport: '({count} calls reported no token usage)',
+            usageScope: 'Counted by this plugin only, in Host process memory: a DSH restart clears it. Resetting the counters never deletes settings.',
+            usageReset: 'Reset counters',
             enterToSendLabel: 'Enter accepts and sends',
             enterToSendHint: 'Tab only accepts; plain Enter accepts and sends the prediction.',
             predictOnActivateLabel: 'Predict on session open',

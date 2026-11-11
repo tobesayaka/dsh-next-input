@@ -462,3 +462,83 @@ test('rejects invalid settings without touching the file', async () => {
   assert.deepEqual(await unknown.json(), { error: 'unknown_setting', field: 'nope' });
   assert.throws(() => readFileSync(initial.path, 'utf8'));
 });
+
+async function* meteredStream() {
+  yield { type: 'text-delta', index: 0, text: 'Run the uploader tests.' };
+  yield {
+    type: 'usage',
+    usage: { inputTokens: 1200, outputTokens: 9, totalTokens: 1209, cacheReadTokens: 800 },
+  };
+  yield { type: 'finish', reason: { kind: 'stop' } };
+}
+
+test('reports token usage per prediction and counts answers served by the cache', async () => {
+  const { route, routes } = install(meteredStream);
+  const usageRoute = routes.get('/api/next-input.usage');
+  assert.ok(usageRoute, 'the usage route is registered');
+
+  const before = await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json();
+  assert.equal(before.usage.calls, 0);
+  assert.equal(before.usage.totalTokens, 0);
+
+  assert.equal((await route.fetch(requestFor(conversation))).status, 200);
+
+  const after = await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json();
+  assert.equal(after.usage.calls, 1);
+  assert.equal(after.usage.callsWithUsage, 1);
+  assert.equal(after.usage.withoutUsage, 0);
+  assert.equal(after.usage.inputTokens, 1200);
+  assert.equal(after.usage.outputTokens, 9);
+  assert.equal(after.usage.totalTokens, 1209);
+  assert.equal(after.usage.cacheReadTokens, 800);
+  assert.equal(after.usage.answered, 1);
+  assert.equal(after.usage.duplicate, 0);
+  assert.equal(after.usage.recent.length, 1);
+  assert.equal(after.usage.recent[0].model, 'deepseek-v4-flash');
+  assert.equal(after.usage.recent[0].source, 'answer');
+  assert.equal(after.usage.recent[0].totalTokens, 1209);
+  assert.deepEqual(after.usage.byRoute, [{ id: 'deepseek-official/deepseek-v4-flash', calls: 1, inputTokens: 1200, outputTokens: 9, totalTokens: 1209 }]);
+
+  // The settings page carries the same counters.
+  const settings = routes.get('/api/next-input.settings');
+  const page = await (await settings.fetch(settingsRequest('GET'))).json();
+  assert.equal(page.usage.totalTokens, 1209);
+
+  const reset = await (await settings.fetch(settingsRequest('POST', { resetUsage: true }))).json();
+  assert.equal(reset.reset, true);
+  assert.equal(reset.usage.totalTokens, 0);
+  assert.equal(reset.usage.answered, 0);
+});
+
+test('counts a second in-flight prediction for the same answer without calling the model', async () => {
+  let gate;
+  const gatePromise = new Promise((resolve) => {
+    gate = resolve;
+  });
+  const pending = [];
+  let modelCalls = 0;
+  // The first stream blocks; a duplicate that slipped past the guard would
+  // reach the model and push a second stream — give it a moment to do so.
+  async function* slowStream() {
+    modelCalls += 1;
+    await gatePromise;
+    yield { type: 'text-delta', index: 0, text: 'slow' };
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  const { route, routes } = install(slowStream);
+  pending.push(route.fetch(requestFor(conversation)));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const second = await route.fetch(requestFor(conversation));
+  assert.equal(second.status, 429);
+  assert.deepEqual(await second.json(), { error: 'in_flight' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate();
+  assert.equal((await pending[0]).status, 200);
+  assert.equal(modelCalls, 1);
+
+  const usageRoute = routes.get('/api/next-input.usage');
+  const usage = await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json();
+  assert.equal(usage.usage.calls, 1);
+  assert.equal(usage.usage.duplicate, 1);
+});

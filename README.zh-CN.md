@@ -60,6 +60,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 | 最大上下文字符 | 送入预测的对话字符上限。 |
 | 最大消息条数 | 送入预测的消息条数上限。 |
 | 最大建议字符 | 返回给输入框的建议最大长度。 |
+| 用量（本次 Host 运行） | 只统计本插件：预测调用次数、输入/输出/总计 token、平均每次、命中缓存的输入、缓存直接命中次数、被拒绝的重复请求；“重置计数”只清计数，不改设置。 |
 
 - **保存** 立即应用到下一次预测；不会重载插件，也不会清空 Host 预测缓存。
 - 配置保存在插件的用户数据文件：
@@ -68,6 +69,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 - `cordis.patch.yml` 里该行的 `config` 仍然作为基线；**重置为 profile 默认值** 会删除设置文件并回退到基线。
 - provider/model 下拉通过 `llm.listProviders()` 和 `llm.listModels()` 填充；已经不在目录里的旧值会作为 `(unavailable)` 选项保留。
 - 想恢复“跟随当前对话的模型”，在 provider 下拉里选回这一项即可，它会同时清空两个字段。
+- 用量数字来自每次预测时 provider 返回的 `usage`，只保存在 Host 进程内存里（DSH 重启清零）；`GET /api/next-input.usage` 返回同一组数字。
 
 ## 工作原理
 
@@ -110,7 +112,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 
 每完成一轮，最近的用户/助手文本会作为一次辅助请求发送给当前配置的模型提供商。Host 会校验会话仍存在、provider 已注册。预测文本只存在于 Host 进程内存和可选的设置文件里；不会写入会话日志、磁盘缓存或 `localStorage`。设置文件只包含布尔值、数字和 provider/model id，不包含凭据。
 
-每次预测都会消耗 provider token。停用插件行或关闭 `predictOnActivate` 即可停止额外调用。
+每次预测都会消耗 provider token。一个回答在一页里最多触发一次预测，同一会话最多一个在途请求：客户端把已预测过的回答记在 HTML 根节点上（刷新即清空，因为刷新前在途的预测无法回填）、在本页内记住已消耗过的回答，来自重挂载或激活查询的重复预测都会被拒绝；Host 在第一个 `session + answer` 请求还在流式返回时会拒绝重复请求。设置页的“用量”分区会显示实际开销。停用插件行或关闭 `predictOnActivate` 即可停止额外调用。
 
 ## 排查
 
@@ -134,7 +136,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 ## 开发
 
 ```bash
-npm test        # 28 个测试
+npm test        # 30 个测试
 npm run check   # node --check host/client
 ```
 

@@ -73,6 +73,7 @@ NextInput**. It provides:
 | Max context characters | Conversation characters kept for the prediction. |
 | Max messages | Conversation messages kept. |
 | Max suggestion characters | Longest suggestion returned to the composer. |
+| Usage (this Host session) | Counters for this plugin only: prediction calls, input/output/total tokens, average per call, cache-hit input, answers served from the cache, and duplicate requests refused. “Reset counters” clears them without touching the saved settings. |
 
 - **Save** applies to the next prediction immediately. It does not reload the
   plugin and does not clear the Host prediction cache.
@@ -86,6 +87,9 @@ NextInput**. It provides:
   an `(unavailable)` option.
 - To restore the default “follow the conversation's model”, choose that entry
   in the provider dropdown; it clears both fields.
+- Usage counters come from the provider's `usage` chunk for each prediction and
+  live in Host process memory (a DSH restart clears them); `GET
+  /api/next-input.usage` returns the same numbers.
 
 ## How it works
 
@@ -155,8 +159,14 @@ the optional settings file; it is not written to the Session log, disk cache, or
 `localStorage`. The settings file contains only booleans, numbers, and
 provider/model ids, never credentials.
 
-Each prediction consumes provider tokens. Disable the plugin row or turn off
-`predictOnActivate` to stop the extra calls.
+Each prediction consumes provider tokens. One completed answer triggers at most
+one call per page and at most one in flight per Session: the client marks the
+answer it already predicted on the HTML root (cleared by a reload, whose
+in-flight prediction cannot be back-filled), remembers what it consumed in the
+page, refuses to re-predict from a remount or activation lookup, and the Host
+refuses a duplicate `session + answer` request while the first one streams. The
+Usage section of the settings page shows what was actually spent. Disable the
+plugin row or turn off `predictOnActivate` to stop the extra calls.
 
 ## Troubleshooting
 
@@ -195,7 +205,7 @@ Each prediction consumes provider tokens. Disable the plugin row or turn off
 ## Development
 
 ```bash
-npm test        # 28 tests
+npm test        # 30 tests
 npm run check   # node --check for host and client halves
 ```
 

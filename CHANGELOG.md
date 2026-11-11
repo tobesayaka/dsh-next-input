@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+- Usage counters in the settings page (this Host session): prediction calls,
+  input/output/total tokens from the provider's `usage` chunk, average per
+  call, cache-hit input, cache-served answers, refused duplicates, and
+  “Reset counters”. Also served at `GET /api/next-input.usage`.
+- One answer no longer spends tokens twice: the overlay records predicted
+  answers on the HTML root (survives remounts, cleared by reload), skips
+  re-prediction from remounts and activation lookups, and the Host refuses a
+  duplicate `session + answer` request while the first call is in flight.
+- The in-flight guards now claim before the first await, so a duplicate that
+  arrives while the first prediction is still preparing can no longer slip
+  through.
+- 30 tests covering routes, settings, route selection, usage, parser, and
+  client registration.
+
 ## 0.3.0
 
 - `enterToSend` and `predictOnActivate` now default to `true`; both can still be
