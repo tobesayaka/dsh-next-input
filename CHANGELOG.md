@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.2
+
+- The client half reads the locale service from the injected context
+  (`ctx.locale`) instead of looking it up with `ctx.get('locale')`, and
+  registers its Chinese and English dictionaries from one `ctx.effect`, so a
+  reload or disable of the plugin unregisters them with it.
+- Dropped the unused `{name}` interpolation from `translate()`; the usage and
+  invalid-number copy is filled in at the call sites, as before.
+- Documented how the dictionaries are registered under **Interface
+  language**, and clarified that `locale/` only holds Plugin Manager metadata.
+
 ## 0.5.1
 
 - Labels listed from a slot's own table now follow the DSH interface language.
