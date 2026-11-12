@@ -18,10 +18,48 @@ in the empty composer, and lets the user accept it with **Tab**.
 - `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
   it.
 - Follows the DSH interface language: the ghost hint, the announcements, and
-  the Settings page switch between Chinese and English (with the built-in
-  English copy as the fallback when the locale service is unavailable).
+  the Settings page switch between Chinese and English (see
+  [Interface language](#interface-language)).
 - Never writes the conversation into a prediction cache, Session log, or
   `localStorage`.
+
+## Interface language
+
+The plugin has **no language setting of its own**. The ghost hint, the
+screen-reader announcements, and the Settings page follow DSH's interface
+language, chosen once in **Settings → General → Language**; a switch re-renders
+them without a reload.
+
+Only the two baseline languages exist: **简体中文 (`zh`)** and **English
+(`en`)**. Both dictionaries are registered with DSH's locale service
+(`@deepseek-ai/dsh-client-locale`) under the single namespace `dsh-next-input`,
+in one call, and `locale` is a required dependency:
+
+```js
+inject: ['slots', 'locale'],
+apply(ctx) {
+  ctx.effect(
+    () => ctx.locale.register(NS, { zh: zhDictionary, en: enDictionary }),
+    'dsh-next-input: dictionaries',
+  );
+}
+```
+
+- `translate(ctx, key)` reads `ctx.locale.bind(NS)(key)`; `enDictionary` is also
+  the fallback when `bind` echoes the key (no locale service, e.g. a plain
+  browser test).
+- `subscribeLocale` / `localeRevision` feed
+  `React.useSyncExternalStore`, so a language switch re-renders the ghost and
+  the Settings page; the copy itself is never cached.
+- The settings-section label is a function, `() => translate(ctx, 'settingsNav')`,
+  which is why the sidebar row follows the language without re-registering.
+- `locale/en.json` and `locale/zh.json` are **only** the plugin-card metadata
+  (`meta.title`, `meta.description`) that the Plugin Manager reads. Never put UI
+  copy there.
+
+Do not add a plugin-owned language picker, register a third language, or persist
+a language preference in `settings.json`. The workspace contract behind this is
+in the parent README's “多语言：只跟随 DSH，只做 zh / en”.
 
 ## Requirements
 
@@ -95,9 +133,8 @@ under *Built-in plugins* any more. It provides:
   live in Host process memory (a DSH restart clears them); `GET
   /api/next-input.usage` returns the same numbers.
 - The page and the in-composer copy follow the DSH interface language
-  (Settings → General → Language). The plugin requires the `locale` service and
-  registers its Chinese and English dictionaries as one namespace, and the
-  settings-section labels are re-read whenever the interface language changes.
+  (Settings → General → Language); see [Interface language](#interface-language)
+  for how the dictionaries are registered.
 
 ## How it works
 
@@ -213,7 +250,7 @@ plugin row or turn off `predictOnActivate` to stop the extra calls.
 ## Development
 
 ```bash
-npm test        # 31 tests
+npm test        # node --test: host routes, parser, client + locale tests
 npm run check   # node --check for host and client halves
 ```
 
@@ -222,7 +259,8 @@ Layout:
 - `src/index.js` — Host routes, prediction call, cache, settings file.
 - `src/client.js` — composer ghost, key handling, settings section, locale.
 - `cordis.patch.yml` — inserts the `next-input` row.
-- `locale/` — Plugin Manager metadata and client strings.
+- `locale/` — Plugin Manager metadata only (`meta.title` / `meta.description`,
+  one file per baseline language). UI copy lives in `src/client.js`.
 - `test/` — host route, parser, and client registration tests.
 
 ## License

@@ -12,8 +12,31 @@
 - Host 按 `sessionId + answerKey` 缓存预测；切会话、overlay 重挂载、刷新页面后可以恢复。
 - 只有草稿为空、会话空闲时显示 ghost。
 - 按 Tab 采纳；默认开启“普通 Enter 采纳并发送”。
-- 跟随 DSH 界面语言：输入框提示、读屏播报和设置页随 DSH 语言实时切换中英文（取不到语言服务时用内置英文文案兜底）。
+- 跟随 DSH 界面语言：输入框提示、读屏播报和设置页随 DSH 语言实时切换中英文（见[界面语言](#界面语言)）。
 - 不把对话写入预测缓存、会话日志或 `localStorage`。
+
+## 界面语言
+
+插件**没有自己的语言设置**。输入框 ghost 提示、读屏播报和设置页都跟随 DSH 的界面语言——在 **设置 → 通用 → 语言** 里选一次；切换后无需刷新即可重渲染。
+
+只提供两种基线语言：**简体中文（`zh`）** 和 **English（`en`）**。两本字典一次性注册到 DSH 的 locale 服务（`@deepseek-ai/dsh-client-locale`），命名空间只有 `dsh-next-input` 一个，且 `locale` 是必填依赖：
+
+```js
+inject: ['slots', 'locale'],
+apply(ctx) {
+  ctx.effect(
+    () => ctx.locale.register(NS, { zh: zhDictionary, en: enDictionary }),
+    'dsh-next-input: dictionaries',
+  );
+}
+```
+
+- `translate(ctx, key)` 读 `ctx.locale.bind(NS)(key)`；`enDictionary` 同时是 `bind` 原样返回 key 时（没有语言服务，例如纯浏览器测试）的兜底文案。
+- `subscribeLocale` / `localeRevision` 接给 `React.useSyncExternalStore`，切语言时 ghost 和设置页重渲染；文案本身从不缓存。
+- 设置分区侧栏的 `label` 是函数 `() => translate(ctx, 'settingsNav')`，所以侧栏行跟着语言变，不需要重新注册。
+- `locale/en.json`、`locale/zh.json` **只**给插件管理器读取插件卡片的元信息（`meta.title`、`meta.description`），不要往里放界面文案。
+
+不要加插件自己的语言选择器、不要注册第三种语言、也不要把语言偏好写进 `settings.json`。这条约定的完整背景见上层 [README](../README.md) 的「多语言：只跟随 DSH，只做 zh / en」。
 
 ## 环境要求
 
@@ -71,7 +94,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 - provider/model 下拉通过 `llm.listProviders()` 和 `llm.listModels()` 填充；已经不在目录里的旧值会作为 `(unavailable)` 选项保留。
 - 想恢复“跟随当前对话的模型”，在 provider 下拉里选回这一项即可，它会同时清空两个字段。
 - 用量数字来自每次预测时 provider 返回的 `usage`，只保存在 Host 进程内存里（DSH 重启清零）；`GET /api/next-input.usage` 返回同一组数字。
-- 设置页和输入框内的文案跟随 DSH 界面语言（设置 → 通用 → 语言）。插件要求 `locale` 服务可用，并把中英字典注册为同一个命名空间；界面语言变化时，设置分区的标签也会重新读取。
+- 设置页和输入框内的文案跟随 DSH 界面语言（设置 → 通用 → 语言）；字典如何注册见[界面语言](#界面语言)。
 
 ## 工作原理
 
@@ -138,7 +161,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 ## 开发
 
 ```bash
-npm test        # 31 个测试
+npm test        # node --test：Host 路由、解析、Client 与语言测试
 npm run check   # node --check host/client
 ```
 
@@ -147,7 +170,7 @@ npm run check   # node --check host/client
 - `src/index.js` — Host 路由、预测调用、缓存、设置文件。
 - `src/client.js` — 输入框 ghost、按键处理、设置分区、locale。
 - `cordis.patch.yml` — 插入 `next-input` 行。
-- `locale/` — Plugin Manager 元数据和客户端文案。
+- `locale/` — 只放 Plugin Manager 元信息（`meta.title` / `meta.description`，每种基线语言一个文件）。界面文案在 `src/client.js` 里。
 - `test/` — Host 路由、解析、Client 注册测试。
 
 ## License

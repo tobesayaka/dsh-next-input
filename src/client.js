@@ -22,77 +22,15 @@ window.__ModuleLoader__.load({
     const SETTLE_DELAY_MS = 50;
     const EMPTY = [];
 
-    const FALLBACK = {
-      tab: 'Tab',
-      hint: 'Tab to accept',
-      enterSend: 'Enter sends',
-      hintEnter: 'Tab to accept; Enter to accept and send',
-      announce: 'A next-input prediction is available. Press Tab to accept.',
-      announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
-      fallback: 'Prediction',
-      settingsNav: 'Next input',
-      settingsTitle: 'Next input',
-      settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
-      sectionPrediction: 'Prediction',
-      sectionModel: 'Model & latency',
-      sectionContext: 'Context & output',
-      sectionUsage: 'Usage (this Host session)',
-      usageCalls: 'Prediction calls',
-      usageTokens: 'Tokens used',
-      usageAverage: 'Avg per call',
-      usageInput: 'Input tokens',
-      usageOutput: 'Output tokens',
-      usageCacheRead: 'Cache-hit input',
-      usageServed: '{answered} answers served from the cache · {duplicate} duplicate requests refused',
-      usageNoReport: '({count} calls reported no token usage)',
-      usageScope: 'Counted by this plugin only, in Host process memory: a DSH restart clears it. Resetting the counters never deletes settings.',
-      usageReset: 'Reset counters',
-      enterToSendLabel: 'Enter accepts and sends',
-      enterToSendHint: 'Tab only accepts; plain Enter accepts and sends the prediction.',
-      predictOnActivateLabel: 'Predict on session open',
-      predictOnActivateHint: 'When no cached prediction exists, opening a session generates one. Costs one model call.',
-      predictionProviderLabel: 'Prediction provider',
-      predictionProviderHint: 'Default: follow the model selected in each conversation (falling back to the model that produced the last answer). Pick a route only to pin a dedicated, faster model.',
-      predictionModelLabel: 'Prediction model',
-      predictionModelHint: 'Only used with a provider picked above.',
-      maxTokensLabel: 'Max output tokens',
-      timeoutLabel: 'Timeout (ms)',
-      maxContextCharsLabel: 'Max context characters',
-      maxMessagesLabel: 'Max messages',
-      maxSuggestionCharsLabel: 'Max suggestion characters',
-      save: 'Save',
-      saving: 'Saving…',
-      reset: 'Reset to profile defaults',
-      saved: 'Saved. Applies to the next prediction.',
-      loadFailed: 'Could not load settings.',
-      saveFailed: 'Could not save settings.',
-      loading: 'Loading…',
-      providerPair: 'Set both provider and model, or leave both empty.',
-      automaticRoute: 'Use latest answer’s route',
-      selectModel: 'Select a model',
-      noModels: 'No models advertised',
-      invalidNumber: 'Enter a whole number between {min} and {max}.',
-      readOnly: 'Settings are not editable in this profile.',
-    };
 
     const CSS = `
 [${GHOST_ATTR}] [data-composer-placeholder]{visibility:hidden !important}
 `;
 
-    /**
-     * The DSH locale runtime (`@deepseek-ai/dsh-client-locale`), or `null`.
-     *
-     * The service is looked up on every call, never captured: this plugin's
-     * client entry loads in the boot tier and may run before the locale plugin
-     * has provided it, and a later switch of the interface language must be
-     * seen as well. Without the service the plugin keeps its built-in English
-     * copy instead of showing raw keys.
-     * @param {any} ctx
-     * @returns {any}
-     */
+    /** The DSH locale service injected into this plugin's context, or `null`. */
     function localeService(ctx) {
       try {
-        const face = ctx.get('locale');
+        const face = ctx.locale;
         return face !== undefined && face !== null && typeof face.bind === 'function' ? face : null;
       } catch (error) {
         return null;
@@ -137,13 +75,17 @@ window.__ModuleLoader__.load({
      */
     function translate(ctx, key) {
       const face = localeService(ctx);
-      if (face === null) return FALLBACK[key] || key;
-      try {
-        const text = face.bind(NS)(key);
-        return text === key ? (FALLBACK[key] || key) : text;
-      } catch (error) {
-        return FALLBACK[key] || key;
+      let text = '';
+      if (face !== null) {
+        try {
+          text = String(face.bind(NS)(key) ?? key);
+        } catch (error) {
+          text = '';
+        }
       }
+      // `bind` echoes the key when the namespace has no entry; that is not copy.
+      if (text === '' || text === key || text === NS + '.' + key) text = enDictionary[key] || key;
+      return text;
     }
 
     // Session-scoped marks live on the HTML root (not localStorage): they
@@ -1792,16 +1734,10 @@ window.__ModuleLoader__.load({
       // before the locale plugin finishes its async apply.
       inject: ['slots', 'locale'],
       apply(ctx) {
-        // Both dictionaries are always registered: the service keeps them for the
-        // whole page session and switches between them natively. A duplicate (a
-        // reload of this plugin alone rebuilds the entry over the same service)
-        // throws inside the service; the earlier registration stays in force.
-        const locale = ctx.get('locale');
-        if (locale !== undefined && locale !== null && typeof locale.register === 'function') {
-          try {
-            locale.register(NS, { zh: zhDictionary, en: enDictionary });
-          } catch (error) {}
-        }
+        // Both baseline languages in one call: the service keeps them for the
+        // whole page session and switches between them natively. `inject` names
+        // `locale`, so the service is there before this runs.
+        ctx.effect(() => ctx.locale.register(NS, { zh: zhDictionary, en: enDictionary }), 'dsh-next-input: dictionaries');
 
         const label = (key) => () => translate(ctx, key);
 
