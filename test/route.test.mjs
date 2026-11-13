@@ -719,3 +719,35 @@ test('Max mode gives a multiline suggestion room by default', async () => {
   const cappedBody = await (await capped.route.fetch(requestFor(conversation))).json();
   assert.ok(cappedBody.suggestion.length <= 60);
 });
+
+test('tool activity reaches the prompt only in Max mode with the switch on', async () => {
+  const body = {
+    ...conversation,
+    toolActivity: '- edit src/client.js\n- bash: npm test',
+  };
+
+  const on = install(goodStream, { maxMode: true });
+  await on.route.fetch(requestFor(body));
+  const sent = on.calls[0].options.messages[0].content[0].text;
+  assert.match(sent, /tool calls the assistant made/u);
+  assert.match(sent, /- edit src\/client\.js/u);
+
+  const off = install(goodStream, { maxMode: true, includeToolActivity: false });
+  await off.route.fetch(requestFor(body));
+  assert.doesNotMatch(off.calls[0].options.messages[0].content[0].text, /edit src\/client\.js/u);
+
+  // Max mode off: the field is ignored even though it was sent.
+  const legacy = install(goodStream, { maxMode: false });
+  await legacy.route.fetch(requestFor(body));
+  assert.doesNotMatch(legacy.calls[0].options.messages[0].content[0].text, /edit src\/client\.js/u);
+});
+
+test('a caller cannot push an oversized tool summary into the prompt', async () => {
+  const max = install(goodStream, { maxMode: true });
+  await max.route.fetch(requestFor({
+    ...conversation,
+    toolActivity: '- ' + 'x'.repeat(20000),
+  }));
+  const sent = max.calls[0].options.messages[0].content[0].text;
+  assert.ok(sent.length < 12000, 'the summary is bounded before it reaches the model');
+});

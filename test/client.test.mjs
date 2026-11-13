@@ -562,3 +562,102 @@ test('smart packing obeys the message cap', () => {
   const smart = client.__test.packConversationSmart(messages, 50000, 5);
   assert.ok(smart.length <= 5);
 });
+
+// ---------------------------------------------------------------------------
+// Tool activity summary (Max mode `includeToolActivity`). The helpers are
+// module-private, so they come out of the bundle through the same test hook
+// pattern the rest of this file uses.
+// ---------------------------------------------------------------------------
+
+function toolEvent(type, seq, data) {
+  return { type: 'event', event: { type, seq, data } };
+}
+
+function activityEntries(calls, results) {
+  const entries = [toolEvent('turn/start', 1, {})];
+  for (const call of calls) {
+    entries.push(toolEvent('tool/call', call.seq, { callId: call.callId, name: call.name, arguments: JSON.stringify(call.args) }));
+    if (call.result !== undefined) {
+      entries.push(toolEvent('tool/result', call.seq + 1, {
+        callId: call.callId,
+        message: { role: 'tool', toolCallId: call.callId, isError: call.result === 'error', content: [{ type: 'text', text: 'ok' }] },
+      }));
+    }
+  }
+  entries.push(toolEvent('assistant/message', 99, { message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] } }));
+  return entries;
+}
+
+test('summarises a turn as file edits and recent commands', () => {
+  const client = loadClient(makeStorage());
+  const entries = activityEntries([
+    { seq: 2, callId: 'a', name: 'bash', args: { command: 'go test ./...' }, result: 'ok' },
+    { seq: 4, callId: 'b', name: 'read', args: { path: 'src/client.js' } },
+    { seq: 6, callId: 'c', name: 'edit', args: { path: 'src/client.js' } },
+    { seq: 8, callId: 'd', name: 'edit', args: { path: 'src/index.js' }, result: 'error' },
+  ]);
+  const summary = client.__test.toolActivitySummary(entries, 1200);
+  assert.match(summary, /edit src\/client\.js/u);
+  assert.match(summary, /edit src\/index\.js \[failed\]/u);
+  assert.match(summary, /bash: go test \.\/\.\.\./u);
+  assert.match(summary, /- read src\/client\.js/u);
+});
+
+test('collapses repeated commands and keeps the most recent ones', () => {
+  const client = loadClient(makeStorage());
+  const calls = [];
+  for (let index = 0; index < 9; index += 1) {
+    calls.push({ seq: 10 + index * 2, callId: 'c' + index, name: 'bash', args: { command: 'echo ' + index } });
+  }
+  const summary = client.__test.toolActivitySummary(activityEntries(calls), 5000);
+  assert.match(summary, /5 earlier calls/u);
+  assert.match(summary, /echo 8/u);
+  assert.doesNotMatch(summary, /echo 0/u, 'only the most recent commands stay');
+});
+
+test('a summary cut to the budget ends on a line boundary', () => {
+  const client = loadClient(makeStorage());
+  const calls = [];
+  for (let index = 0; index < 12; index += 1) {
+    calls.push({ seq: 10 + index * 2, callId: 'c' + index, name: 'bash', args: { command: 'command number ' + index } });
+  }
+  const summary = client.__test.toolActivitySummary(activityEntries(calls), 120);
+  assert.ok(summary.length <= 130);
+  assert.match(summary, /- …$/u, 'a truncation marker closes the block');
+  // Every line but the marker is a complete entry.
+  for (const line of summary.split('\n')) {
+    if (line === '- …') continue;
+    assert.match(line, /^- (bash: |bash: \d+ earlier calls)/u);
+  }
+});
+
+test('malformed tool arguments fall back to the tool name', () => {
+  const client = loadClient(makeStorage());
+  const entries = [
+    { type: 'event', event: { type: 'turn/start', seq: 1, data: {} } },
+    { type: 'event', event: { type: 'tool/call', seq: 2, data: { callId: 'x', name: 'bash', arguments: '{not json' } } },
+    { type: 'event', event: { type: 'assistant/message', seq: 9, data: { message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } } } },
+  ];
+  assert.match(client.__test.toolActivitySummary(entries, 1200), /bash/u);
+});
+
+test('no tool calls means no summary block', () => {
+  const client = loadClient(makeStorage());
+  const entries = [
+    { type: 'event', event: { type: 'turn/start', seq: 1, data: {} } },
+    { type: 'event', event: { type: 'assistant/message', seq: 9, data: { message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } } } },
+  ];
+  assert.equal(client.__test.toolActivitySummary(entries, 1200), '');
+});
+
+test('an absolute tool path is shortened to match how the transcript names it', () => {
+  const client = loadClient(makeStorage());
+  const entries = activityEntries([
+    { seq: 2, callId: 'a', name: 'edit', args: { path: '/Users/ming/go/src/athand/native/internal/overlay/overlay_darwin.m' } },
+    { seq: 4, callId: 'b', name: 'edit', args: { path: 'src/client.js' } },
+  ]);
+  const summary = client.__test.toolActivitySummary(entries, 1200);
+  assert.match(summary, /edit …\/overlay\/overlay_darwin\.m/u);
+  assert.doesNotMatch(summary, /\/Users\/ming/u);
+  assert.match(summary, /edit src\/client\.js/u, 'relative paths are untouched');
+});
