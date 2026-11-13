@@ -218,12 +218,87 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Max mode packing: reserve the earliest user request before spending the
+     * budget, so the message that says what the user actually wants cannot be
+     * crowded out by newer answers. The final answer keeps the largest share,
+     * the last request is next, and whatever is left fills newest-first.
+     *
+     * Still a character estimate, not tokens: `maxChars` is the same knob the
+     * rest of the plugin already exposes.
+     * @param {Array<{ role: string, text: string }>} all
+     * @param {number} maxChars
+     * @param {number} maxMessages
+     */
+    function packConversationSmart(all, maxChars, maxMessages) {
+      let lastAssistant = -1;
+      for (let index = all.length - 1; index >= 0; index -= 1) {
+        if (all[index].role === 'assistant') {
+          lastAssistant = index;
+          break;
+        }
+      }
+      if (lastAssistant < 0) return [];
+
+      // The oldest still-relevant request: the first user message of the turn
+      // that produced the latest answer, or the very first one in the window.
+      let firstUser = -1;
+      for (let index = 0; index < all.length; index += 1) {
+        if (all[index].role === 'user') {
+          firstUser = index;
+          break;
+        }
+      }
+      let lastUser = -1;
+      for (let index = lastAssistant - 1; index >= 0; index -= 1) {
+        if (all[index].role === 'user') {
+          lastUser = index;
+          break;
+        }
+      }
+
+      const picked = [];
+      const used = new Set();
+      let budget = Math.max(1, maxChars);
+      const add = (index, cap, keepTail) => {
+        if (index < 0 || used.has(index) || picked.length >= maxMessages) return false;
+        const room = Math.min(cap, budget);
+        if (room < 20) return false;
+        let text = all[index].text;
+        if (text.length > room) {
+          text = keepTail ? text.slice(text.length - room) : text.slice(0, room);
+        }
+        text = text.trim();
+        if (text === '') return false;
+        picked.push({ index, role: all[index].role, text });
+        used.add(index);
+        budget -= text.length;
+        return true;
+      };
+
+      // Reserve the opening request first. It is usually short, and without it
+      // the predictor only sees what was asked most recently, not the goal.
+      add(firstUser, Math.max(40, Math.floor(maxChars * 0.2)), false);
+      // Then the request that produced the latest answer, and that answer.
+      add(lastUser, Math.max(40, Math.floor(maxChars * 0.25)), false);
+      add(lastAssistant, Math.max(40, Math.floor(maxChars * 0.45)), true);
+
+      for (let index = all.length - 1; index >= 0 && picked.length < maxMessages && budget > 40; index -= 1) {
+        if (used.has(index)) continue;
+        add(index, budget, true);
+      }
+
+      picked.sort((left, right) => left.index - right.index);
+      return picked.map(({ role, text }) => ({ role, text }));
+    }
+
+    /**
      * Recent human and assistant text from the loaded Session window, oldest
      * first, plus the route that produced the latest answer.
      * @param {any} sessions
      * @param {string | undefined} sessionId
+     * @param {{ maxMode: boolean, smartPack: boolean } | null} maxSettings
      */
-    function readConversation(sessions, sessionId) {
+    function readConversation(sessions, sessionId, maxSettings) {
       if (sessions === undefined || sessions === null || sessionId === undefined || sessionId === null) {
         return { messages: EMPTY, model: null, answerKey: null };
       }
@@ -285,7 +360,12 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return { messages: packConversation(all, MAX_CONTEXT_CHARS, MAX_MESSAGES), model, answerKey };
+      const smart = maxSettings !== null && maxSettings !== undefined
+        && maxSettings.maxMode === true && maxSettings.smartPack === true;
+      const messages = smart
+        ? packConversationSmart(all, MAX_CONTEXT_CHARS, MAX_MESSAGES)
+        : packConversation(all, MAX_CONTEXT_CHARS, MAX_MESSAGES);
+      return { messages, model, answerKey };
     }
 
     /** The Lexical root the overlay is anchored to. */
@@ -350,6 +430,10 @@ window.__ModuleLoader__.load({
       const routeRef = React.useRef(null);
       // Window-behind retries for one scheduled prediction; reset on schedule.
       const attemptsRef = React.useRef(0);
+      // Max mode switches read once per page from the settings route. The
+      // packing happens in this half, so it needs the Host's values; a failed
+      // read leaves the 0.5.x packing in place.
+      const maxRef = React.useRef(null);
 
       const [suggestion, setSuggestion] = React.useState(null);
       const [box, setBox] = React.useState(null);
@@ -504,7 +588,7 @@ window.__ModuleLoader__.load({
         const session = sessionRef.current;
         if (sessions === undefined || sessions === null || session === undefined || session === null) return;
 
-        const conversation = readConversation(sessions, session);
+        const conversation = readConversation(sessions, session, maxRef.current);
         const selection = readSelection(sessions, session);
         const last = conversation.messages[conversation.messages.length - 1];
         // The event window can trail the running flag by a frame; retry briefly
@@ -582,6 +666,29 @@ window.__ModuleLoader__.load({
           void generate();
         }, delay);
       };
+
+      // Read the Max mode switches once per mount. Packing happens here, so the
+      // Host's values have to reach this half; a failed read keeps `null`, and
+      // every prediction falls back to the 0.5.x packing.
+      React.useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+          try {
+            const response = await fetch(SETTINGS_ROUTE);
+            const data = await response.json().catch(() => null);
+            if (cancelled || data === null || data.values === undefined || data.values === null) return;
+            maxRef.current = {
+              maxMode: data.values.maxMode === true,
+              smartPack: data.values.smartPack === true,
+            };
+          } catch {
+            // Keep the fallback packing.
+          }
+        })();
+        return () => {
+          cancelled = true;
+        };
+      }, []);
 
       // A completed turn is the trigger. New turns and Session switches cancel
       // work; a non-empty draft means the user already knows what to type.
@@ -2007,7 +2114,7 @@ window.__ModuleLoader__.load({
       },
     };
     if (typeof window !== 'undefined' && window.__DSH_NEXT_INPUT_TEST__ === true) {
-      api.__test = { readConversation, readSelection };
+      api.__test = { readConversation, readSelection, packConversation, packConversationSmart };
     }
     return api;
   },
