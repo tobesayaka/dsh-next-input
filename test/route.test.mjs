@@ -751,3 +751,21 @@ test('a caller cannot push an oversized tool summary into the prompt', async () 
   const sent = max.calls[0].options.messages[0].content[0].text;
   assert.ok(sent.length < 12000, 'the summary is bounded before it reaches the model');
 });
+
+test('the next prompt explains the tool activity block it may receive', async () => {
+  // The prompt has to name the block, otherwise the model sees bare
+  // "bash: ..." / "edit ..." lines with no statement that they are context.
+  const max = install(goodStream, { maxMode: true });
+  await max.route.fetch(requestFor(conversation));
+  assert.match(max.calls[0].options.system, /tool calls the assistant made in its latest turn/u);
+
+  // Neither the legacy prompt nor the Max-off path mentions it, so a reader
+  // cannot mistake this for something the baseline model is told.
+  const legacy = install(goodStream, { maxMode: true, promptVariant: 'legacy' });
+  await legacy.route.fetch(requestFor(conversation));
+  assert.doesNotMatch(legacy.calls[0].options.system, /tool calls the assistant made/u);
+
+  const off = install(goodStream, { maxMode: false });
+  await off.route.fetch(requestFor(conversation));
+  assert.doesNotMatch(off.calls[0].options.system, /tool calls the assistant made/u);
+});
