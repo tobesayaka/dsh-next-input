@@ -148,28 +148,35 @@ predictions behave exactly as they did before Max mode existed: same prompt,
 same single-line cleaning, same context packing, same lowest reasoning effort.
 
 Switch it on in **Settings → Next input → Max mode**. The master switch gates
-seven sub-switches; each one can be turned off on its own to find out which
-change helped.
+seven sub-switches plus the four budgets described below; each sub-switch can be
+turned off on its own to find out which change helped, and the budgets stay
+locked while the master switch is off.
 
 | Sub-switch | Key | What it changes |
 |---|---|---|
 | Tool activity | `includeToolActivity` | Adds a summary of the latest turn's tool calls to the prediction request. Files are listed by path and deduplicated, commands keep the most recent four with a count of the rest, failures are marked `[failed]`. Absolute paths are shortened to their last two segments so they match how the transcript names files. Capped at 1200 characters and cut on a line boundary. |
 | Improved context packing | `smartPack` | Reserves the earliest user request before spending the context budget, then the last request and the final answer. Without it, a turn full of long answers can crowd the opening request out entirely. Still a character budget, not tokens. |
-| Allow multiline suggestions | `allowMultiline` | Keeps the prediction's line breaks and cuts on a line boundary instead of collapsing to one line. While `maxSuggestionChars` is still at its default `140`, Max mode uses `400`; any explicit value wins. |
+| Allow multiline suggestions | `allowMultiline` | Keeps the prediction's line breaks and cuts on a line boundary instead of collapsing to one line. Its length cap is the `maxSuggestionChars` budget below. |
 | Reasoning effort | `reasoningEffort` | `model` stops pinning the lowest advertised effort and lets the provider decide. `low` / `medium` / `high` pin a level, and are sent only when the model advertises it. |
 | Retry on failure | `retryOnFailure` | Retries once after a 250 ms backoff. The retry shares the same wall-clock bound, so `timeoutMs` still caps the whole prediction. |
 | Only predict after an answer | `predictOnEndOnly` | Ignores `predictOnActivate`, so opening a Session does not spend an extra model call. |
 | Prediction prompt | `promptVariant` | `next` works out the situation first (asking a question, waiting for a confirmation, reporting a finished or failed result), then names the next action. When the next message carries more than one point, it uses a numbered list, a bulleted list, or a fenced block instead of one run-on sentence. `legacy` keeps the original prompt. |
 
-**Context and output budgets.** Max mode also widens two budgets, using the
-same rule as `maxSuggestionChars`: the Max mode value applies **only while the
-setting is still at its default**, and any explicit value wins.
+**Budgets.** Four numeric settings live in this section and are used **only
+while Max mode is on**. With Max mode off the prediction uses the hardcoded
+0.5.x budgets and never reads them, so changing them has no effect until the
+switch is on.
 
-| Setting | Default | Max mode | Why |
+| Setting | Max mode default | Used with Max off | Why |
 |---|---|---|---|
-| Max context characters `maxContextChars` | 8000 | 32000 | 8000 characters only fit two or three long answers, so the model cannot see how this user writes. Codex inherits the whole thread; a wider character budget closes part of that gap. |
-| Max messages `maxMessages` | 24 | 64 | Same reason; in a long Session the 24-message cap runs out before the character budget does. |
-| Max output tokens `maxTokens` | 512 | 1024 | A structured prediction plus a reasoning model's hidden tokens does not fit in 512. The 20 s timeout still applies. |
+| Max context characters `maxContextChars` | 32000 | 8000 | 8000 characters only fit two or three long answers, so the model cannot see how this user writes. Codex inherits the whole thread; a wider character budget closes part of that gap. |
+| Max messages `maxMessages` | 64 | 24 | Same reason; in a long Session the 24-message cap runs out before the character budget does. |
+| Max output tokens `maxTokens` | 1024 | 512 | A structured prediction plus a reasoning model's hidden tokens does not fit in 512. |
+| Max suggestion characters `maxSuggestionChars` | 400 | 140 | A structured prediction is longer than one line. |
+
+The timeout (`timeoutMs`, default 20000 ms) is **not** a budget: it lives
+outside this section, always applies, and keeps capping the whole prediction,
+retry included.
 
 **Packing happens in the browser.** The client reads these values once, when the
 composer overlay mounts, and caches them. So:
@@ -227,11 +234,11 @@ page stores overrides in the plugin's settings file.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `maxSuggestionChars` | `140` | Longest suggestion returned. |
-| `maxContextChars` | `8000` | Conversation characters kept. |
-| `maxMessages` | `24` | Conversation messages kept. |
-| `maxTokens` | `512` | Output cap for the prediction call. |
-| `timeoutMs` | `20000` | Wall-clock bound for one prediction. |
+| `maxSuggestionChars` | `400` | Longest suggestion returned. Max mode only (140 with Max off). |
+| `maxContextChars` | `32000` | Conversation characters kept. Max mode only (8000 with Max off). |
+| `maxMessages` | `64` | Conversation messages kept. Max mode only (24 with Max off). |
+| `maxTokens` | `1024` | Output cap for the prediction call. Max mode only (512 with Max off). |
+| `timeoutMs` | `20000` | Wall-clock bound for one prediction. Always applies. |
 | `enterToSend` | `true` | Plain Enter accepts and sends the prediction. |
 | `predictOnActivate` | `true` | Generate a missing prediction when a Session is opened. |
 | `predictionProvider` | `''` | Optional fixed provider route; set both fields or neither. Empty means “follow the Session's model”. |
