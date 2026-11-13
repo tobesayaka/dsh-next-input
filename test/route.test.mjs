@@ -170,7 +170,9 @@ test('honors the suggestion length configuration', async () => {
     yield { type: 'text-delta', index: 0, text: 'one two three four five six' };
     yield { type: 'finish', reason: { kind: 'stop' } };
   }
-  const { route } = install(longStream, { maxSuggestionChars: 13 });
+  // The suggestion cap is a Max mode budget: it is only read while Max mode
+  // is on, so the test enables it rather than relying on a default.
+  const { route } = install(longStream, { maxMode: true, maxSuggestionChars: 13 });
   const response = await route.fetch(requestFor(conversation));
   const body = await response.json();
   assert.ok(body.suggestion.length <= 13, body.suggestion);
@@ -181,7 +183,7 @@ test('keeps the most recent context when the conversation is too long', async ()
     yield { type: 'text-delta', index: 0, text: 'ok' };
     yield { type: 'finish', reason: { kind: 'stop' } };
   }
-  const { route, calls } = install(shortStream, { maxContextChars: 80, maxMessages: 24 });
+  const { route, calls } = install(shortStream, { maxMode: true, maxContextChars: 80, maxMessages: 24 });
   const response = await route.fetch(requestFor({
     ...conversation,
     messages: [
@@ -200,7 +202,7 @@ test('keeps the user request when the final answer fills the budget', async () =
     yield { type: 'text-delta', index: 0, text: 'ok' };
     yield { type: 'finish', reason: { kind: 'stop' } };
   }
-  const { route, calls } = install(shortStream, { maxContextChars: 200, maxMessages: 24 });
+  const { route, calls } = install(shortStream, { maxMode: true, maxContextChars: 200, maxMessages: 24 });
   const response = await route.fetch(requestFor({
     ...conversation,
     messages: [
@@ -226,19 +228,16 @@ function longConversation() {
   return { ...conversation, messages };
 }
 
-test('Max mode widens the context budget and keeps the opening request', async () => {
+test('Max mode reads the context budget from the settings page', async () => {
   const { route, calls } = install(goodStream, { maxMode: true });
   assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
   const text = calls[0].options.messages[0].content[0].text;
-  // Every round is 76 + 4008 characters, so 32000 characters keep all six.
-  // The 0.5.x 8000-character budget drops the opening rounds.
+  // Every round is 76 + 4008 characters, so the 32000 default keeps all six.
   assert.match(text, /goal marker 0/);
   assert.match(text, /goal marker 3/);
 });
 
-test('Max mode leaves an explicit context budget alone', async () => {
-  // 7000 rather than 8000: the Max mode defaults only apply while the setting
-  // still equals its default, so an explicit value that differs must win.
+test('Max mode honors a context budget the user changed', async () => {
   const { route, calls } = install(goodStream, { maxMode: true, maxContextChars: 7000 });
   assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
   const text = calls[0].options.messages[0].content[0].text;
@@ -246,24 +245,27 @@ test('Max mode leaves an explicit context budget alone', async () => {
   assert.doesNotMatch(text, /goal marker 3/);
 });
 
-test('turning Max mode off keeps the default context budget', async () => {
-  const { route, calls } = install(goodStream);
+test('with Max mode off the budgets are hardcoded and the settings are ignored', async () => {
+  // A budget large enough to keep everything would show up if it were read;
+  // Max off must fall back to the 0.5.x 8000 characters regardless.
+  const { route, calls } = install(goodStream, { maxContextChars: 50000, maxMessages: 100 });
   assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
   const text = calls[0].options.messages[0].content[0].text;
   assert.doesNotMatch(text, /goal marker 0/);
   assert.doesNotMatch(text, /goal marker 3/);
 });
 
-test('Max mode raises the output budget only while it is still default', async () => {
-  const raised = install(goodStream, { maxMode: true });
-  assert.equal((await raised.route.fetch(requestFor(conversation))).status, 200);
-  assert.equal(raised.calls[0].maxTokens, 1024);
+test('the output budget follows Max mode and the settings', async () => {
+  const on = install(goodStream, { maxMode: true });
+  assert.equal((await on.route.fetch(requestFor(conversation))).status, 200);
+  assert.equal(on.calls[0].maxTokens, 1024);
 
-  const explicit = install(goodStream, { maxMode: true, maxTokens: 256 });
-  assert.equal((await explicit.route.fetch(requestFor(conversation))).status, 200);
-  assert.equal(explicit.calls[0].maxTokens, 256);
+  const changed = install(goodStream, { maxMode: true, maxTokens: 256 });
+  assert.equal((await changed.route.fetch(requestFor(conversation))).status, 200);
+  assert.equal(changed.calls[0].maxTokens, 256);
 
-  const off = install(goodStream);
+  // With Max off a changed value is not read: the hardcoded 512 applies.
+  const off = install(goodStream, { maxTokens: 256 });
   assert.equal((await off.route.fetch(requestFor(conversation))).status, 200);
   assert.equal(off.calls[0].maxTokens, 512);
 });
@@ -470,17 +472,22 @@ function settingsRequest(method, body) {
 }
 
 test('reads, saves, and resets settings through the settings route', async () => {
-  const { route, routes, calls } = install(goodStream);
+  // maxTokens is a Max mode budget, so the run that checks it takes effect
+  // turns Max mode on; the defaults reported by the route are the Max values.
+  const { route, routes, calls } = install(goodStream, { maxMode: true });
   const settings = routes.get('/api/next-input.settings');
   const initial = await (await settings.fetch(settingsRequest('GET'))).json();
   assert.equal(initial.editable, true);
-  assert.equal(initial.values.maxTokens, 512);
+  assert.equal(initial.values.maxTokens, 1024);
+  assert.equal(initial.values.maxContextChars, 32000);
+  assert.equal(initial.values.maxMessages, 64);
+  assert.equal(initial.values.maxSuggestionChars, 400);
   assert.equal(initial.values.enterToSend, true);
   assert.equal(initial.values.predictOnActivate, true);
   assert.deepEqual(initial.route, { source: 'session' });
   assert.equal(initial.providers[0].id, 'deepseek-official');
   assert.equal(initial.providers[0].models[0].id, 'fast-model');
-  assert.equal(initial.defaults.maxTokens, 512);
+  assert.equal(initial.defaults.maxTokens, 1024);
 
   const saved = await settings.fetch(settingsRequest('POST', {
     values: {
@@ -508,7 +515,7 @@ test('reads, saves, and resets settings through the settings route', async () =>
 
   const reset = await settings.fetch(settingsRequest('POST', { reset: true }));
   const resetBody = await reset.json();
-  assert.equal(resetBody.values.maxTokens, 512);
+  assert.equal(resetBody.values.maxTokens, 1024);
   assert.equal(resetBody.values.enterToSend, true);
   assert.equal(resetBody.values.predictOnActivate, true);
   assert.equal(resetBody.route.source, 'session');

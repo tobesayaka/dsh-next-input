@@ -472,7 +472,7 @@ function labelsOf(tree) {
 test('renders the Max mode section with its sub-switches locked while off', async () => {
   const settings = {
     values: {
-      maxSuggestionChars: 140, maxContextChars: 8000, maxMessages: 24, maxTokens: 512, timeoutMs: 20000,
+      maxSuggestionChars: 400, maxContextChars: 32000, maxMessages: 64, maxTokens: 1024, timeoutMs: 20000,
       enterToSend: true, predictOnActivate: true, predictionProvider: '', predictionModel: '',
       maxMode: false, includeToolActivity: true, smartPack: true, allowMultiline: true,
       reasoningEffort: 'model', retryOnFailure: true, predictOnEndOnly: true, promptVariant: 'next',
@@ -506,10 +506,14 @@ test('renders the Max mode section with its sub-switches locked while off', asyn
   assert.ok(controls.has('Enable Max mode'), 'the master switch renders');
   assert.equal(controls.get('Enable Max mode').disabled, false, 'the master switch is always editable');
   for (const label of ['Include tool activity', 'Improved context packing', 'Allow multiline suggestions',
-    'Reasoning effort', 'Retry on failure', 'Only predict after an answer', 'Prediction prompt']) {
+    'Reasoning effort', 'Retry on failure', 'Only predict after an answer', 'Prediction prompt',
+    // The four numeric budgets moved into this section and follow the switch.
+    'Max output tokens', 'Max context characters', 'Max messages', 'Max suggestion characters']) {
     assert.ok(controls.has(label), label + ' renders');
     assert.equal(controls.get(label).disabled, true, label + ' is locked while Max mode is off');
   }
+  // The timeout is not a Max mode budget, so it stays editable outside it.
+  assert.equal(controls.get('Timeout (ms)').disabled, false, 'the timeout stays editable');
 });
 
 function longConversation(turns) {
@@ -566,15 +570,16 @@ test('smart packing obeys the message cap', () => {
 test('Max mode reads the budgets from the settings page', () => {
   const client = loadClient(makeStorage());
   const { contextCharsForSettings, maxMessagesForSettings } = client.__test;
-  // Untouched defaults: Max mode uses its own wider budgets.
-  assert.equal(contextCharsForSettings({ maxContextChars: 8000 }), 32000);
-  assert.equal(maxMessagesForSettings({ maxMessages: 24 }), 64);
-  // A value the user changed always wins.
-  assert.equal(contextCharsForSettings({ maxContextChars: 12000 }), 12000);
-  assert.equal(maxMessagesForSettings({ maxMessages: 10 }), 10);
-  // A failed settings read leaves the key missing: treat it as the default.
-  assert.equal(contextCharsForSettings({}), 32000);
-  assert.equal(maxMessagesForSettings({}), 64);
+  // Max mode on: the settings page values apply verbatim.
+  assert.equal(contextCharsForSettings({ maxContextChars: 32000 }, true), 32000);
+  assert.equal(maxMessagesForSettings({ maxMessages: 64 }, true), 64);
+  assert.equal(contextCharsForSettings({ maxContextChars: 12000 }, true), 12000);
+  // Max mode off: the hardcoded 0.5.x budgets apply and the settings are not read.
+  assert.equal(contextCharsForSettings({ maxContextChars: 32000 }, false), 7000);
+  assert.equal(maxMessagesForSettings({ maxMessages: 64 }, false), 24);
+  // A failed settings read (nothing to read) falls back the same way.
+  assert.equal(contextCharsForSettings(undefined, true), 7000);
+  assert.equal(maxMessagesForSettings(null, true), 24);
 });
 
 test('readConversation passes the Max mode budgets to the packing', () => {
