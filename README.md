@@ -9,14 +9,16 @@ in the empty composer, and lets the user accept it with **Tab**.
 ## What it does
 
 - Watches the current Session after a turn settles.
-- Reads only human and assistant text from the loaded event window.
+- Reads only human and assistant text from the loaded event window; Max mode can
+  add a summary of that turn's tool calls (see [Max mode](#max-mode)).
 - Uses the model selected in the conversation (falling back to the route that
   produced the latest assistant answer), or an optional fixed prediction route.
 - Caches predictions on the Host by `sessionId + answerKey`, so switching
   Sessions, remounting the composer, or reloading the page restores the ghost.
 - Shows the prediction only while the composer is empty and the Session is idle.
 - Wraps a prediction longer than one line inside the composer width, like typed
-  text, instead of truncating it.
+  text, instead of truncating it. Max mode also stops forcing the prediction
+  onto a single line (see [Max mode](#max-mode)).
 - `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
   it.
 - Follows the DSH interface language: the ghost hint, the announcements, and
@@ -138,13 +140,51 @@ under *Built-in plugins* any more. It provides:
   (Settings → General → Language); see [Interface language](#interface-language)
   for how the dictionaries are registered.
 
+## Max mode
+
+**Off by default.** While the master switch is off, every key below is inert and
+predictions behave exactly as they did before Max mode existed: same prompt,
+same single-line cleaning, same context packing, same lowest reasoning effort.
+
+Switch it on in **Settings → Next input → Max mode**. The master switch gates
+seven sub-switches; each one can be turned off on its own to find out which
+change helped.
+
+| Sub-switch | Key | What it changes |
+|---|---|---|
+| Tool activity | `includeToolActivity` | Adds a summary of the latest turn's tool calls to the prediction request. Files are listed by path and deduplicated, commands keep the most recent four with a count of the rest, failures are marked `[failed]`. Absolute paths are shortened to their last two segments so they match how the transcript names files. Capped at 1200 characters and cut on a line boundary. |
+| Improved context packing | `smartPack` | Reserves the earliest user request before spending the context budget, then the last request and the final answer. Without it, a turn full of long answers can crowd the opening request out entirely. Still a character budget, not tokens. |
+| Allow multiline suggestions | `allowMultiline` | Keeps the prediction's line breaks and cuts on a line boundary instead of collapsing to one line. While `maxSuggestionChars` is still at its default `140`, Max mode uses `400`; any explicit value wins. |
+| Reasoning effort | `reasoningEffort` | `model` stops pinning the lowest advertised effort and lets the provider decide. `low` / `medium` / `high` pin a level, and are sent only when the model advertises it. |
+| Retry on failure | `retryOnFailure` | Retries once after a 250 ms backoff. The retry shares the same wall-clock bound, so `timeoutMs` still caps the whole prediction. |
+| Only predict after an answer | `predictOnEndOnly` | Ignores `predictOnActivate`, so opening a Session does not spend an extra model call. |
+| Prediction prompt | `promptVariant` | `next` asks for specifics from this turn (file, function, command, error) and lets the length follow the user's own messages. `legacy` keeps the original prompt. |
+
+**Packing happens in the browser.** The client reads these values once, when the
+composer overlay mounts, and caches them. So:
+
+- The prompt, reasoning-effort, retry, multiline, and tool-activity changes
+  apply to the next prediction immediately after **Save**.
+- Changing `smartPack` or `includeToolActivity` needs a **page refresh** before
+  it affects what the client sends.
+- If that one read fails, every prediction falls back to the pre-Max behaviour
+  rather than breaking.
+
+A multiline suggestion is a passing shape, not a failure: when the next step
+naturally needs structure (a pasted error, several conditions, a list), it
+beats forcing everything onto one line. The length criterion targets empty
+verbosity, not line count.
+
 ## How it works
 
 1. **Client trigger.** When a turn ends, the overlay reads the recent event
    window and schedules one prediction.
 2. **Host call.** `POST /api/next-input.predict` validates the Session and
    provider, packs the last user message and final answer first, and calls
-   `ctx.llm.prepareCall()` with the least advertised reasoning effort.
+   `ctx.llm.prepareCall()`. With Max mode off this uses the least advertised
+   reasoning effort and the original prompt; the
+   [Max mode](#max-mode) switches change the packing, the effort, the prompt,
+   and whether a tool-activity summary rides along.
 3. **Cache.** A successful prediction is stored in Host process memory under
    `sessionId + answerKey` (24-hour TTL, at most 100 entries).
 4. **Restore.** After a Session switch, reload, or remount, the client asks
@@ -183,6 +223,19 @@ page stores overrides in the plugin's settings file.
 | `predictOnActivate` | `true` | Generate a missing prediction when a Session is opened. |
 | `predictionProvider` | `''` | Optional fixed provider route; set both fields or neither. Empty means “follow the Session's model”. |
 | `predictionModel` | `''` | Optional fixed model id; set both fields or neither. |
+| `maxMode` | `false` | Master switch for Max mode. While off, none of the keys below are read. |
+| `includeToolActivity` | `true` | Send the latest turn's tool calls. Only read in Max mode. |
+| `smartPack` | `true` | Reserve the opening request when packing context. Only read in Max mode. |
+| `allowMultiline` | `true` | Keep line breaks; lifts the suggestion cap to `400` while `maxSuggestionChars` is at its default. Only read in Max mode. |
+| `reasoningEffort` | `'model'` | `model` / `low` / `medium` / `high`. Only read in Max mode. |
+| `retryOnFailure` | `true` | One backoff retry inside `timeoutMs`. Only read in Max mode. |
+| `predictOnEndOnly` | `true` | Ignore `predictOnActivate`. Only read in Max mode. |
+| `promptVariant` | `'next'` | `legacy` / `next`. Only read in Max mode. |
+
+The two enum keys are validated: an unknown `reasoningEffort` or
+`promptVariant` is rejected by the settings route, and ignored when it comes
+from the profile `config` row, rather than silently selecting a mode that does
+not exist.
 
 ## Speed
 
@@ -193,18 +246,24 @@ dominated by the model. To make predictions appear sooner:
   conversation's model is slow.
 - Lower `maxTokens` (for example `256`) and, if needed, the context budgets.
 - Keep `predictOnActivate` on when you want the ghost ready right after opening
-  a Session, off to avoid pre-generation calls.
+  a Session, off to avoid pre-generation calls. In Max mode,
+  `predictOnEndOnly` does the same without touching the older switch.
 - The client starts the turn-end prediction after a short settle delay and
   retries briefly while the event window catches up.
+- In Max mode, `reasoningEffort: 'model'` can make a reasoning model take
+  longer than the old lowest-effort pin. Pin `low` if latency matters more than
+  the prediction.
 
 ## Privacy and cost
 
 The recent human/assistant text is sent to the configured provider as one
-auxiliary request per completed turn. The Host checks that the Session is live
-and the provider is registered. Prediction text lives in Host process memory and
-the optional settings file; it is not written to the Session log, disk cache, or
-`localStorage`. The settings file contains only booleans, numbers, and
-provider/model ids, never credentials.
+auxiliary request per completed turn. With Max mode's `includeToolActivity` on,
+a summary of the latest turn's tool calls is sent too: command lines, file
+paths, and failure markers — not tool output bodies. The Host checks that the
+Session is live and the provider is registered. Prediction text lives in Host
+process memory and the optional settings file; it is not written to the Session
+log, disk cache, or `localStorage`. The settings file contains only booleans,
+numbers, enum values, and provider/model ids, never credentials.
 
 Each prediction consumes provider tokens. One completed answer triggers at most
 one call per page and at most one in flight per Session: the client marks the
@@ -230,6 +289,12 @@ plugin row or turn off `predictOnActivate` to stop the extra calls.
   plugin, then reopen Settings → Plugins.
 - **Prediction never appears:** check that the composer is empty, the Session is
   idle, and `llm.listProviders()` still contains the selected route.
+- **Max mode seems to do nothing:** the sub-switches are locked while the master
+  switch is off. If you changed `smartPack` or `includeToolActivity`, refresh the
+  page — those two are read once when the composer mounts.
+- **A prediction still comes out as one line in Max mode:** `allowMultiline` is
+  off, `maxSuggestionChars` was lowered below the default, or the model chose a
+  single line, which is allowed.
 
 ## Limitations
 
@@ -245,6 +310,13 @@ plugin row or turn off `predictOnActivate` to stop the extra calls.
 - “The current model” means the model selected in the Session, then the latest
   answer's route, unless a prediction route is pinned in Settings.
 - Only the loaded browser event window contributes context.
+- Tool activity in Max mode is a *summary*, not the tool output: it reports what
+  ran and what failed, never the command's stdout or a diff body. It covers the
+  latest answer's turn only; older activity is already reflected in what the
+  assistant said.
+- The Max mode switches that affect what the browser sends (`smartPack`,
+  `includeToolActivity`) are read once per mount, so changing them needs a page
+  refresh. The rest apply on the next prediction.
 - The settings page is plugin-owned rather than a schema-derived Plugin Manager
   form.
 - The settings file is shared by the DSH installation (not per profile).
