@@ -29,6 +29,22 @@ import { dirname, join } from 'node:path';
  */
 const MAX_MODE_SUGGESTION_CHARS = 400;
 
+/**
+ * Max mode context budget. Codex predicts from the parent thread's full
+ * state; the 0.5.x 8000 characters only carry a couple of answers, which is
+ * too little for the model to copy how this user writes. Like the suggestion
+ * cap, these apply only while the matching setting is still at its default.
+ */
+const MAX_MODE_CONTEXT_CHARS = 32000;
+const MAX_MODE_MAX_MESSAGES = 64;
+
+/**
+ * Max mode output budget. A structured prediction (a short list, an answer
+ * with its condition) plus a reasoning model's hidden tokens does not fit in
+ * 512. Still bounded by the 20 s timeout, so this stays a middle value.
+ */
+const MAX_MODE_MAX_TOKENS = 1024;
+
 const DEFAULTS = {
   /** Longest suggestion the route returns. */
   maxSuggestionChars: 140,
@@ -355,6 +371,46 @@ function suggestionCapFor(options) {
   return options.maxSuggestionChars;
 }
 
+/**
+ * The conversation budget the Host packs for.
+ *
+ * Same rule as `suggestionCapFor`: Max mode widens the budget only while the
+ * user has not touched the setting; an explicit value always wins. With Max
+ * off this returns the plain setting, so the 0.5.x path is unchanged.
+ * @param {Record<string, any>} options
+ */
+function contextCharsFor(options) {
+  if (options.maxMode === true && options.maxContextChars === DEFAULTS.maxContextChars) {
+    return MAX_MODE_CONTEXT_CHARS;
+  }
+  return options.maxContextChars;
+}
+
+/**
+ * The message-count budget the Host packs for.
+ * @param {Record<string, any>} options
+ */
+function maxMessagesFor(options) {
+  if (options.maxMode === true && options.maxMessages === DEFAULTS.maxMessages) {
+    return MAX_MODE_MAX_MESSAGES;
+  }
+  return options.maxMessages;
+}
+
+/**
+ * The output cap a prediction asks for.
+ *
+ * Max mode raises the 512 default because a structured prediction plus hidden
+ * reasoning does not fit; an explicit value always wins.
+ * @param {Record<string, any>} options
+ */
+function maxTokensFor(options) {
+  if (options.maxMode === true && options.maxTokens === DEFAULTS.maxTokens) {
+    return MAX_MODE_MAX_TOKENS;
+  }
+  return options.maxTokens;
+}
+
 const SYSTEM_PROMPT = `You are the next-message predictor inside a chat between a user and an AI coding assistant.
 
 Read the conversation and predict the exact message the user is most likely to send next.
@@ -384,7 +440,9 @@ Rules:
 - Output only the message itself: no quotes, no label, no preamble, no markdown fences around the whole message.
 - Match the user's language and register. If they mix Chinese and English, mix the same way.
 - Ground the prediction in specifics from this turn: name the file, function, command, or error the assistant just mentioned. Never invent paths or identifiers.
-- Match the length of the user's own messages. If their earlier messages were one short line, keep it short. If the follow-up naturally needs structure (a list, a pasted error, several conditions), use it.
+- Work out the situation first: is the assistant asking a question, waiting for a confirmation, or reporting a finished or failed result? Then name the next action the user would ask for.
+- When the next message carries more than one decision, point, or observation, write it as structure the user would type: a short numbered or bulleted list for choices and steps, a fenced block for a pasted command or error, or a short list plus one closing line for a verdict. Prefer this over one run-on sentence. Keep each line short; no heading, no bold, and no summarizing paragraph after the list.
+- When the next message is a single short decision or question, keep it to one line. Do not manufacture structure for a one-word answer.
 - When the assistant asks a question or offers options, answer as the user would, including the condition or reason, not just the label.
 - When the assistant claims a task is done, prefer the concrete next check or next instruction over generic praise.
 - Do not restate the assistant's wording.
@@ -570,7 +628,10 @@ function normalizeInput(body, options) {
     all.push({ role: item.role, text });
   }
 
-  const messages = packMessages(all, options);
+  const messages = packMessages(all, {
+    maxContextChars: contextCharsFor(options),
+    maxMessages: maxMessagesFor(options),
+  });
   if (!messages.some((message) => message.role === 'assistant')) return { error: 'missing_answer' };
   // Only read when the switch that needs it is on, and bound its size: it is
   // caller-supplied text that ends up in the prompt.
@@ -683,7 +744,7 @@ async function predict(ctx, options, state, request) {
         const effort = reasoningEffortFor(options, callModel);
         return {
           ...controls,
-          maxTokens: options.maxTokens,
+          maxTokens: maxTokensFor(options),
           ...(effort === undefined ? {} : { reasoningEffort: effort }),
         };
       },

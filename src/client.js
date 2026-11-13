@@ -22,6 +22,13 @@ window.__ModuleLoader__.load({
     // Tool activity is orientation, not a transcript: keep it small enough to
     // leave the conversation budget intact.
     const MAX_TOOL_ACTIVITY_CHARS = 1200;
+    // Max mode context budget. Mirrors the Host's `MAX_MODE_*` constants and
+    // `DEFAULTS`; only used while the user has not changed the setting, so an
+    // explicit value from the settings page always wins.
+    const MAX_MODE_CONTEXT_CHARS = 32000;
+    const MAX_MODE_MAX_MESSAGES = 64;
+    const DEFAULT_CONTEXT_CHARS = 8000;
+    const DEFAULT_MAX_MESSAGES = 24;
     const SETTLE_DELAY_MS = 50;
     const EMPTY = [];
 
@@ -338,6 +345,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Conversation characters Max mode packs with. Same rule as the Host's
+     * `contextCharsFor`: widen only while the setting is still at its default.
+     * A missing value means the settings read failed or predates the key, which
+     * is treated as the default.
+     * @param {{ maxContextChars?: number }} maxSettings
+     */
+    function contextCharsForSettings(maxSettings) {
+      const value = maxSettings.maxContextChars;
+      if (typeof value !== 'number' || value === DEFAULT_CONTEXT_CHARS) return MAX_MODE_CONTEXT_CHARS;
+      return value;
+    }
+
+    /**
+     * Message-count budget Max mode packs with.
+     * @param {{ maxMessages?: number }} maxSettings
+     */
+    function maxMessagesForSettings(maxSettings) {
+      const value = maxSettings.maxMessages;
+      if (typeof value !== 'number' || value === DEFAULT_MAX_MESSAGES) return MAX_MODE_MAX_MESSAGES;
+      return value;
+    }
+
+    /**
      * Keep the final answer and the user request that produced it even when the
      * answer is much longer than the character budget. Older messages fill the
      * remainder, newest first.
@@ -529,14 +559,21 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const smart = maxSettings !== null && maxSettings !== undefined
-        && maxSettings.maxMode === true && maxSettings.smartPack === true;
-      const messages = smart
-        ? packConversationSmart(all, MAX_CONTEXT_CHARS, MAX_MESSAGES)
-        : packConversation(all, MAX_CONTEXT_CHARS, MAX_MESSAGES);
-      const withTools = maxSettings !== null && maxSettings !== undefined
-        && maxSettings.maxMode === true && maxSettings.includeToolActivity === true;
-      const toolActivity = withTools ? toolActivitySummary(snapshot.entries, MAX_TOOL_ACTIVITY_CHARS) : '';
+      // The Max mode switches and the budgets they may widen. Only read in Max
+      // mode: with Max off, packing keeps the 0.5.x constants below.
+      const max = maxSettings !== null && maxSettings !== undefined && maxSettings.maxMode === true;
+      const contextChars = max
+        ? contextCharsForSettings(maxSettings)
+        : MAX_CONTEXT_CHARS;
+      const maxMessages = max
+        ? maxMessagesForSettings(maxSettings)
+        : MAX_MESSAGES;
+      const messages = max && maxSettings.smartPack === true
+        ? packConversationSmart(all, contextChars, maxMessages)
+        : packConversation(all, contextChars, maxMessages);
+      const toolActivity = max && maxSettings.includeToolActivity === true
+        ? toolActivitySummary(snapshot.entries, MAX_TOOL_ACTIVITY_CHARS)
+        : '';
       return { messages, model, answerKey, toolActivity };
     }
 
@@ -856,6 +893,8 @@ window.__ModuleLoader__.load({
               maxMode: data.values.maxMode === true,
               smartPack: data.values.smartPack === true,
               includeToolActivity: data.values.includeToolActivity === true,
+              maxContextChars: data.values.maxContextChars,
+              maxMessages: data.values.maxMessages,
             };
           } catch {
             // Keep the fallback packing.
@@ -2290,7 +2329,7 @@ window.__ModuleLoader__.load({
       },
     };
     if (typeof window !== 'undefined' && window.__DSH_NEXT_INPUT_TEST__ === true) {
-      api.__test = { readConversation, readSelection, packConversation, packConversationSmart, toolActivitySummary };
+      api.__test = { readConversation, readSelection, packConversation, packConversationSmart, toolActivitySummary, contextCharsForSettings, maxMessagesForSettings };
     }
     return api;
   },
