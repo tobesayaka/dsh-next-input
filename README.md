@@ -162,7 +162,7 @@ locked while the master switch is off.
 | Reasoning effort | `reasoningEffort` | `model` stops pinning the lowest advertised effort and lets the provider decide. `low` / `medium` / `high` pin a level, and are sent only when the model advertises it. |
 | Retry on failure | `retryOnFailure` | Retries once after a 250 ms backoff. The retry shares the same wall-clock bound, so `timeoutMs` still caps the whole prediction. |
 | Only predict after an answer | `predictOnEndOnly` | Ignores `predictOnActivate`, so opening a Session does not spend an extra model call. |
-| Prediction prompt | `promptVariant` | `next` works out the situation first (asking a question, waiting for a confirmation, reporting a finished or failed result), then names the next action. When the next message carries more than one point, it uses a numbered list, a bulleted list, or a fenced block instead of one run-on sentence. `legacy` keeps the original prompt. |
+| Prediction prompt | `promptVariant` | `next` works out the situation first (asking a question, waiting for a confirmation, reporting a finished or failed result), then names the next action. Structure is the default: several decisions, points, questions, or observations, a command or error to paste, or a verdict with its reasons becomes a numbered list, a bulleted list, or a fenced block, and one line is the fallback for a genuinely single-point message. The shape follows what the message carries, not how terse earlier messages were. `legacy` keeps the original prompt. |
 
 **Budgets.** Four numeric settings live in this section and are used **only
 while Max mode is on**. With Max mode off the prediction uses the hardcoded

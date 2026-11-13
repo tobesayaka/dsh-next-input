@@ -1,6 +1,6 @@
 {
   "name": "dsh-next-input",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Predicts your next composer message after an answer and offers it as Tab-to-accept ghost text.",

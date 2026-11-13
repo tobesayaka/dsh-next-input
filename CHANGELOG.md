@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- **The Max mode prompt makes structure the default instead of an exception.** The previous wording asked for a list only when the next message carried more than one decision, so a model that judged the turn single-point fell back to one line, and a terse user history pulled it further toward short sentences. The rule now reads `Default to structure`: several decisions, points, questions, or observations, a command or error to paste, or a verdict with its reasons is the normal shape, and one line is the fallback for a genuinely single-point message.
+- The one-line rule is now explicitly a fallback (`Fall back to one line only when…`) rather than an unconditional cap.
+- **The shape is judged by what the next message carries, not by how terse earlier messages were**, restoring the length-follows-content half of the rule that the original design draft had and the shipped prompt dropped. Budgets, packing, and cleaning are unchanged in this release.
+
 ## 1.0.0
 
 - **First stable release, and the end of new features.** The prediction overlay
