@@ -17,8 +17,9 @@ in the empty composer, and lets the user accept it with **Tab**.
   Sessions, remounting the composer, or reloading the page restores the ghost.
 - Shows the prediction only while the composer is empty and the Session is idle.
 - Wraps a prediction longer than one line inside the composer width, like typed
-  text, instead of truncating it. Max mode also stops forcing the prediction
-  onto a single line (see [Max mode](#max-mode)).
+  text, instead of truncating it; the composer grows with it up to its own height
+  cap, and scrolls the rest inside the input box. Max mode also stops forcing the
+  prediction onto a single line (see [Max mode](#max-mode)).
 - `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
   it.
 - Follows the DSH interface language: the ghost hint, the announcements, and

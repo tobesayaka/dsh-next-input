@@ -37,6 +37,13 @@ window.__ModuleLoader__.load({
 [${GHOST_ATTR}] [data-composer-placeholder]{visibility:hidden !important}
 `;
 
+    /** Two clip boxes describe the same rectangle (or are both missing). */
+    function sameClip(a, b) {
+      if (a === b) return true;
+      if (a === null || b === null || a === undefined || b === undefined) return false;
+      return a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+    }
+
     /** The DSH locale service injected into this plugin's context, or `null`. */
     function localeService(ctx) {
       try {
@@ -646,7 +653,6 @@ window.__ModuleLoader__.load({
 
       const [suggestion, setSuggestion] = React.useState(null);
       const [box, setBox] = React.useState(null);
-      const [reserve, setReserve] = React.useState(0);
       const [fallbackReady, setFallbackReady] = React.useState(false);
       const [restoreTick, setRestoreTick] = React.useState(0);
 
@@ -1072,15 +1078,16 @@ window.__ModuleLoader__.load({
       React.useLayoutEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId || draft !== '' || phase !== 'plain') {
           setBox(null);
-          setReserve(0);
           return undefined;
         }
 
         let disposed = false;
         let frame = 0;
+        let scrollFrame = 0;
         let attempts = 0;
         let card = null;
         let editor = null;
+        let scrollEl = null;
         let observer = null;
         let mutation = null;
         let resizeAttached = false;
@@ -1094,10 +1101,29 @@ window.__ModuleLoader__.load({
             mutation.disconnect();
             mutation = null;
           }
+          if (scrollEl !== null) {
+            scrollEl.removeEventListener('scroll', onScroll);
+            scrollEl = null;
+          }
+          if (scrollFrame !== 0) {
+            window.cancelAnimationFrame(scrollFrame);
+            scrollFrame = 0;
+          }
           if (resizeAttached) {
             window.removeEventListener('resize', measure);
             resizeAttached = false;
           }
+        };
+
+        // The ghost is painted in the card's overlay, outside the scrollport that
+        // owns its room, so a scrollport that widens (scrollbar, sidebar, zoom)
+        // or scrolls has to move the clip box with it.
+        const onScroll = () => {
+          if (scrollFrame !== 0) return;
+          scrollFrame = window.requestAnimationFrame(() => {
+            scrollFrame = 0;
+            measure();
+          });
         };
 
         const measure = () => {
@@ -1134,10 +1160,21 @@ window.__ModuleLoader__.load({
           const width = usePlaceholder
             ? Math.max(48, targetRect.width)
             : Math.max(48, editorRect.width - paddingLeft - paddingRight);
+          // The scrollport is the ghost's clip box: the prediction may be taller
+          // than the composer's height cap, and everything below that cap has to
+          // scroll inside the box instead of painting over the tool row.
+          const scrollRect = scrollEl === null ? null : scrollEl.getBoundingClientRect();
+          const scroll = scrollRect === null || scrollRect.height <= 0 ? null : {
+            left: scrollRect.left - cardRect.left,
+            top: scrollRect.top - cardRect.top,
+            width: scrollRect.width,
+            height: scrollRect.height,
+          };
           const next = {
             left: targetRect.left - cardRect.left + (usePlaceholder ? 0 : paddingLeft),
             top: targetRect.top - cardRect.top + (usePlaceholder ? 0 : paddingTop),
             width,
+            scroll,
             direction: style.direction === 'rtl' ? 'rtl' : 'ltr',
             fontFamily: style.fontFamily,
             fontSize: style.fontSize,
@@ -1148,6 +1185,7 @@ window.__ModuleLoader__.load({
             && previous.left === next.left
             && previous.top === next.top
             && previous.width === next.width
+            && sameClip(previous.scroll, next.scroll)
             && previous.direction === next.direction
             && previous.fontFamily === next.fontFamily
             && previous.fontSize === next.fontSize
@@ -1174,6 +1212,9 @@ window.__ModuleLoader__.load({
             if (attempts <= 300) frame = window.requestAnimationFrame(attach);
             return;
           }
+          scrollEl = editor.closest('[data-input-scroll]');
+          if (scrollEl !== null) scrollEl.addEventListener('scroll', onScroll, { passive: true });
+
           measure();
           frame = window.requestAnimationFrame(measure);
 
@@ -1224,71 +1265,73 @@ window.__ModuleLoader__.load({
       }, [suggestion, box, draft, phase, sessionId]);
 
       // A wrapped prediction must not cover the tool row: let the composer grow
-      // under it like it grows under a typed draft. Only the rows below the
-      // ghost's measured top are reserved — the editor's first line is already
-      // in the empty composer, and the rows above it (inside the card's top
-      // pad) would otherwise push the ghost out of its own line.
+      // under it like it grows under a typed draft. The room is reserved on the
+      // element that wraps the editor, so the scrollport grows with it and the
+      // card's own layout hooks follow. Past the composer's height cap the
+      // scrollport stops growing and clips, and the ghost is painted inside that
+      // clip box (see `ghost` below), so a long prediction scrolls in the box
+      // instead of painting over the tool row and the status line.
       React.useLayoutEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId || box === null
           || draft !== '' || phase !== 'plain') {
-          setReserve(0);
           return undefined;
         }
         const root = rootRef.current;
+        const card = root === null ? null : root.closest('[data-composer-card]');
         const ghost = root === null ? null : root.querySelector('[data-dsh-next-input-ghost]');
-        const scroll = ghost === null ? null : ghost.closest('[data-input-scroll]');
-        const line = Number.parseFloat(box.lineHeight);
-        if (scroll === null || !Number.isFinite(line) || line <= 0) return undefined;
+        const editor = findEditor(card);
+        if (card === null || ghost === null || editor === null) return undefined;
+        const scrollport = editor.closest('[data-input-scroll]');
+        // The scrollport's content wrapper is the element whose height becomes
+        // the composer's height; growing it is what a typed draft does.
+        const host = (scrollport === null ? null : scrollport.firstElementChild)
+          ?? (editor.parentElement === null ? editor : editor.parentElement);
 
-        let connected = false;
-        let extra = 0;
+        let applied = 0;
         let frame = 0;
         let timer = 0;
-        const style = scroll.style;
         const clear = () => {
-          if (!connected) return;
-          window.clearTimeout(timer);
-          if (extra > 0) style.removeProperty('min-height');
-          if (style.length === 0) scroll.removeAttribute('style');
-          connected = false;
+          if (applied === 0) return;
+          applied = 0;
+          host.style.removeProperty('min-height');
+          if (host.style.length === 0) host.removeAttribute('style');
         };
         const measure = () => {
           frame = 0;
-          if (!scroll.isConnected) {
-            if (connected) clear();
+          if (!host.isConnected || !editor.isConnected) {
+            clear();
             return;
           }
-          // A scrollport at its height cap must not inflate its own reservation.
-          const computed = window.getComputedStyle(scroll);
-          const room = Number.parseFloat(computed.maxHeight);
-          const inset = (Number.parseFloat(computed.paddingTop) || 0)
-            + (Number.parseFloat(computed.paddingBottom) || 0);
-          const capped = Number.isFinite(room) && scroll.getBoundingClientRect().height - inset >= room - 1;
-          const next = capped ? extra : Math.max(0, ghost.getBoundingClientRect().height - line);
-          if (next === extra) return;
+          // Everything from the ghost's text origin down to its last line has to
+          // fit in the flow; the first line already sits in the empty composer.
+          // The anchor is measured against the flow wrapper, so both move with
+          // the scroll content and scrolling never changes the reservation.
+          const hostTop = host.getBoundingClientRect().top;
+          const placeholder = card.querySelector('[data-composer-placeholder]');
+          const base = placeholder !== null && placeholder.isConnected
+            ? placeholder.getBoundingClientRect().top - hostTop
+            : editor.getBoundingClientRect().top - hostTop
+              + (Number.parseFloat(window.getComputedStyle(editor).paddingTop) || 0);
+          const next = Math.ceil(base + ghost.getBoundingClientRect().height);
+          if (next === applied) return;
           clear();
-          extra = next;
-          if (extra === 0) {
-            setReserve(0);
-            return;
-          }
-          style.setProperty('min-height', 'calc(100% + ' + extra + 'px)');
-          connected = true;
-          setReserve(extra);
+          if (next <= 0) return;
+          applied = next;
+          host.style.setProperty('min-height', next + 'px');
         };
-        // The scrollport grows with the reservation, which may wrap the ghost
-        // differently (fonts, sidebar, zoom): keep re-measuring until it settles.
+        // Growing the wrapper may wrap the ghost differently (fonts, sidebar,
+        // zoom, scrollbar): keep re-measuring until it settles. The first pass
+        // runs before paint so the ghost never shows a frame over the tool row.
         const schedule = () => {
           if (frame !== 0) window.cancelAnimationFrame(frame);
           frame = window.requestAnimationFrame(measure);
         };
-        schedule();
+        measure();
         timer = window.setInterval(schedule, 250);
         return () => {
-          clear();
           window.clearInterval(timer);
           if (frame !== 0) window.cancelAnimationFrame(frame);
-          setReserve(0);
+          clear();
         };
       }, [suggestion, box, draft, phase, sessionId]);
 
@@ -1303,38 +1346,30 @@ window.__ModuleLoader__.load({
         return () => window.clearTimeout(timer);
       }, [suggestion, box, draft, phase, sessionId]);
 
-      // The ghost's own anchor sits in the card's flex flow with `inset: 0 0
-      // auto; height: 0`: raising only its min-height grows the card by that
-      // amount, and the card's layout hooks (auto-grow, observers) follow.
-      React.useLayoutEffect(() => {
-        const root = rootRef.current;
-        const slot = root === null ? null : root.closest('[data-composer-overlay]');
-        if (slot === null) return;
-        if (reserve > 0) {
-          slot.style.setProperty('min-height', reserve + 'px');
-          return;
-        }
-        if (slot.style.getPropertyValue('min-height') !== '') {
-          slot.style.removeProperty('min-height');
-          if (slot.style.length === 0) slot.removeAttribute('style');
-        }
-      }, [reserve, box, suggestion]);
+      // The ghost is painted inside the scrollport's clip box, so a prediction
+      // taller than the composer's height cap is cut at the box edge and scrolls
+      // with the editor rather than painting over the tool row. The box sits in
+      // the card's overlay, which keeps the ghost out of the editor's own layout.
+      const showing = suggestion !== null && suggestion.sessionId === sessionId
+        && box !== null && draft === '' && phase === 'plain';
+      const clip = showing && box.scroll !== null && box.scroll.height > 0
+        ? { left: box.scroll.left, top: box.scroll.top, width: box.scroll.width, height: box.scroll.height }
+        : null;
 
-      const ghost = suggestion !== null && suggestion.sessionId === sessionId
-        && box !== null && draft === '' && phase === 'plain'
+      const ghost = showing
         ? h('div', {
           'data-dsh-next-input-ghost': '',
           'aria-hidden': 'true',
           title: suggestion.enterToSend === true ? t('hintEnter') : t('hint'),
           style: {
             position: 'absolute',
-            left: box.left,
-            top: box.top,
+            left: clip === null ? box.left : box.left - clip.left,
+            top: clip === null ? box.top : box.top - clip.top,
             width: box.width,
             maxWidth: box.width,
             // A prediction longer than one line wraps inside the composer
             // width, like typed text; the first line keeps `box.top`, and the
-            // effect below reserves the wrapped height on the composer so the
+            // effect above reserves the wrapped height on the composer so the
             // card grows and the tool row moves down instead of being covered.
             // The key hints are inline after the text, so they follow its last
             // line rather than starting a flex line of their own.
@@ -1428,7 +1463,18 @@ window.__ModuleLoader__.load({
         },
       },
       h('style', { key: 'style' }, CSS),
-      ghost,
+      clip === null ? ghost : h('div', {
+        key: 'clip',
+        style: {
+          position: 'absolute',
+          left: clip.left,
+          top: clip.top,
+          width: clip.width,
+          height: clip.height,
+          overflow: 'hidden',
+          pointerEvents: 'none',
+        },
+      }, ghost),
       fallback,
       h('span', {
         key: 'status',
