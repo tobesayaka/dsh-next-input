@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0
+
+- **First stable release, and the end of new features.** The prediction overlay
+  is feature-frozen: from here on this plugin gets fixes only.
+- Where 0.x arrived at that: a `Tab`-to-accept ghost prediction for the next
+  composer message, written by the model selected in the conversation and
+  cached on the Host per `sessionId + answerKey`, so switching Sessions,
+  remounting the composer, or reloading the page restores it; a
+  `Settings → Next input` page holding the route, the latency timeout, and the
+  usage counters (which survive a DSH restart); Max mode, an opt-in switchboard
+  that widens the context and output budgets, packs the context around the
+  opening request, and asks for a structured multiline prediction; and copy,
+  announcements, and labels that follow the DSH interface language.
+
 ## 0.6.0
 
 - **Usage counters persist across restarts.** The totals and per-model rows are written to `<DSH_HOME>/next-input/usage.json` next to the settings file and reloaded on start, so a DSH restart no longer clears the usage section; only **Reset counters** clears it (it deletes that file). The recent-call list stays in memory, and a failed write never fails a prediction.
