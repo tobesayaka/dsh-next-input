@@ -735,6 +735,43 @@ test('reports token usage per prediction and counts answers served by the cache'
   assert.equal(reset.usage.answered, 0);
 });
 
+test('keeps the usage totals and per-model rows across a restart until they are reset', async () => {
+  const first = install(meteredStream);
+  assert.equal((await first.route.fetch(requestFor(conversation))).status, 200);
+
+  // A fresh apply() stands for a DSH restart: same settings directory, new state.
+  const restarted = harness(meteredStream);
+  const usageRoute = restarted.routes.get('/api/next-input.usage');
+  const usage = (await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json()).usage;
+  assert.equal(usage.calls, 1);
+  assert.equal(usage.totalTokens, 1209);
+  assert.equal(usage.inputTokens, 1200);
+  assert.equal(usage.cacheReadTokens, 800);
+  assert.equal(usage.answered, 0);
+  assert.deepEqual(usage.byRoute, [{ id: 'deepseek-official/deepseek-v4-flash', calls: 1, inputTokens: 1200, outputTokens: 9, totalTokens: 1209 }]);
+  assert.equal(usage.recent.length, 0);
+
+  // New predictions add to the restored totals.
+  assert.equal((await restarted.route.fetch(requestFor(conversation))).status, 200);
+  const added = (await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json()).usage;
+  assert.equal(added.calls, 2);
+  assert.equal(added.totalTokens, 2418);
+
+  const settings = restarted.routes.get('/api/next-input.settings');
+  const reset = await (await settings.fetch(settingsRequest('POST', { resetUsage: true }))).json();
+  assert.equal(reset.usage.totalTokens, 0);
+  const afterwards = (await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json()).usage;
+  assert.equal(afterwards.calls, 0);
+  assert.deepEqual(afterwards.byRoute, []);
+  assert.throws(() => readFileSync(join(testHome, 'next-input', 'usage.json'), 'utf8'));
+
+  // The reset is persisted too, so the next restart starts from zero.
+  const again = harness(meteredStream);
+  const zeroed = await (await again.routes.get('/api/next-input.usage').fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json();
+  assert.equal(zeroed.usage.calls, 0);
+  assert.deepEqual(zeroed.usage.byRoute, []);
+});
+
 test('counts a second in-flight prediction for the same answer without calling the model', async () => {
   let gate;
   const gatePromise = new Promise((resolve) => {
