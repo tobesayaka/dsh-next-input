@@ -120,7 +120,7 @@ under *Built-in plugins* any more. It provides:
 | Max context characters | Conversation characters kept for the prediction. |
 | Max messages | Conversation messages kept. |
 | Max suggestion characters | Longest suggestion returned to the composer. |
-| Usage (this Host session) | Counters for this plugin only: prediction calls, input/output/total tokens, average per call, cache-hit input, answers served from the cache, and duplicate requests refused. “Reset counters” clears them without touching the saved settings. |
+| Usage (cumulative) | Counters for this plugin only: prediction calls, input/output/total tokens, average per call, cache-hit input, answers served from the cache, and duplicate requests refused. The totals and per-model rows survive a DSH restart (kept in `<DSH_HOME>/next-input/usage.json`); only “Reset counters” clears them, and it never touches the saved settings. |
 
 - **Save** applies to the next prediction immediately. It does not reload the
   plugin and does not clear the Host prediction cache.
@@ -134,9 +134,10 @@ under *Built-in plugins* any more. It provides:
   an `(unavailable)` option.
 - To restore the default “follow the conversation's model”, choose that entry
   in the provider dropdown; it clears both fields.
-- Usage counters come from the provider's `usage` chunk for each prediction and
-  live in Host process memory (a DSH restart clears them); `GET
-  /api/next-input.usage` returns the same numbers.
+- Usage counters come from the provider's `usage` chunk for each prediction.
+  The totals and per-model rows are written to `usage.json` next to the
+  settings file, so a DSH restart keeps them; the recent-call list is memory
+  only. `GET /api/next-input.usage` returns the same numbers.
 - The page and the in-composer copy follow the DSH interface language
   (Settings → General → Language); see [Interface language](#interface-language)
   for how the dictionaries are registered.

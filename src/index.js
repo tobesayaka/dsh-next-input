@@ -172,6 +172,10 @@ function settingsPath() {
   return join(home, 'next-input', 'settings.json');
 }
 
+function usagePath() {
+  return join(dirname(settingsPath()), 'usage.json');
+}
+
 /**
  * Validate a partial settings patch against the current values.
  * @param {unknown} input
@@ -242,6 +246,67 @@ function writeStoredSettings(file, values) {
   renameSync(temporary, file);
 }
 
+/**
+ * The part of the usage counters that survives a DSH restart: the totals and
+ * the per-model rows. The recent-call list stays in memory. Numbers are
+ * clamped, anything malformed is dropped, so a hand-edited file cannot make
+ * the settings page throw.
+ * @param {Record<string, any>} usage
+ */
+function usageSnapshot(usage) {
+  const total = (value) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0);
+  return {
+    calls: total(usage.calls),
+    callsWithUsage: total(usage.callsWithUsage),
+    withoutUsage: total(usage.withoutUsage),
+    inputTokens: total(usage.inputTokens),
+    outputTokens: total(usage.outputTokens),
+    totalTokens: total(usage.totalTokens),
+    cacheReadTokens: total(usage.cacheReadTokens),
+    ms: total(usage.ms),
+    answered: total(usage.answered),
+    duplicate: total(usage.duplicate),
+    byRoute: [...usage.byRoute].map(([id, entry]) => ({
+      id,
+      calls: total(entry.calls),
+      inputTokens: total(entry.inputTokens),
+      outputTokens: total(entry.outputTokens),
+      totalTokens: total(entry.totalTokens),
+    })),
+  };
+}
+
+/** @param {string} file @param {Record<string, any>} usage */
+function writeUsage(file, usage) {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = file + '.tmp-' + process.pid + '-' + Date.now();
+  writeFileSync(temporary, JSON.stringify(usageSnapshot(usage), null, 2) + '\n', { mode: 0o600 });
+  renameSync(temporary, file);
+}
+
+/** @param {string} file @returns {ReturnType<typeof usageSnapshot> | undefined} */
+function readStoredUsage(file) {
+  let raw;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const byRoute = new Map();
+  for (const entry of Array.isArray(parsed.byRoute) ? parsed.byRoute : []) {
+    if (entry === null || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id === '') continue;
+    byRoute.set(entry.id, entry);
+  }
+  return usageSnapshot({ ...parsed, byRoute });
+}
+
 /** @param {Map<string, any>} cache @param {string} sessionId @param {any} entry */
 function cacheSet(cache, sessionId, entry) {
   cache.delete(sessionId);
@@ -283,9 +348,10 @@ function readUsage(chunk) {
 }
 
 /**
- * Accumulate one completed prediction into the in-process counters. Nothing is
- * persisted: counts live and die with the Host process, like the cache.
- * @param {{ usage: Record<string, any> }} state
+ * Accumulate one completed prediction into the counters, then persist the
+ * totals and per-model rows to `usage.json` so a restart keeps them. The
+ * recent-call list is memory only.
+ * @param {{ usage: Record<string, any>, usageFile: string }} state
  * @param {{ provider: string, model: string, source: string }} route
  * @param {{ inputTokens: number, outputTokens: number, totalTokens: number, cacheReadTokens: number } | undefined} usage
  * @param {number} ms
@@ -325,6 +391,11 @@ function recordUsage(state, route, usage, ms) {
     ms,
   });
   while (summary.recent.length > USAGE_RECENT_LIMIT) summary.recent.shift();
+  try {
+    writeUsage(state.usageFile, summary);
+  } catch {
+    // A failed write must not fail the prediction; the counters stay in memory.
+  }
 }
 
 /**
@@ -931,6 +1002,12 @@ async function settingsRoute(ctx, options, baseOptions, file, request, state) {
     });
     usage.byRoute.clear();
     usage.recent.length = 0;
+    // The file is the persisted copy; removing it is the reset.
+    try {
+      rmSync(state.usageFile, { force: true });
+    } catch {
+      return json({ error: 'usage_reset_failed' }, 500);
+    }
     return json({ usage: usageReport(state), reset: true });
   }
   if (body !== null && typeof body === 'object' && body.reset === true) {
@@ -985,7 +1062,10 @@ export function apply(ctx, config = {}) {
   if (storedSettings !== undefined) Object.assign(options, storedSettings);
 
   ctx.effect(() => {
-    // `usage` is a plain counter object: process-lifetime only, never stored.
+    // `usage` keeps the totals and per-model rows in `usage.json` (cleared
+    // only by "Reset counters"); the recent list lives in memory.
+    const usageFile = usagePath();
+    const stored = readStoredUsage(usageFile);
     const state = {
       active: new Set(),
       inflight: new Set(),
@@ -1003,7 +1083,11 @@ export function apply(ctx, config = {}) {
         duplicate: 0,
         byRoute: new Map(),
         recent: [],
+        ...(stored === undefined
+          ? {}
+          : { ...stored, byRoute: new Map(stored.byRoute.map((entry) => [entry.id, entry])) }),
       },
+      usageFile,
     };
     const disposers = [
       ctx.connection.fetch.register({
