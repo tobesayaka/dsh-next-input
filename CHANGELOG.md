@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - **Usage counters persist across restarts.** The totals and per-model rows are written to `<DSH_HOME>/next-input/usage.json` next to the settings file and reloaded on start, so a DSH restart no longer clears the usage section; only **Reset counters** clears it (it deletes that file). The recent-call list stays in memory, and a failed write never fails a prediction.
 - **Four budgets moved into the Max mode section**: max output tokens, max context characters, max messages, and max suggestion characters now live under **Max mode**, apply **only while Max mode is on**, and are locked while the master switch is off. With Max mode off a prediction uses the original hardcoded values (8000 characters / 24 messages / 512 tokens / 140 characters) and **no longer reads these four settings** — if you changed them in an older version, those changes have no effect with Max mode off. The timeout is not a budget: it stays under "Model & latency" and always applies.

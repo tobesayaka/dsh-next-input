@@ -137,7 +137,8 @@ under *Built-in plugins* any more. It provides:
 - Usage counters come from the provider's `usage` chunk for each prediction.
   The totals and per-model rows are written to `usage.json` next to the
   settings file, so a DSH restart keeps them; the recent-call list is memory
-  only. `GET /api/next-input.usage` returns the same numbers.
+  only. `GET /api/next-input.usage` returns the same numbers; the file holds
+  counts and provider/model ids only — no prompts, answers, or credentials.
 - The page and the in-composer copy follow the DSH interface language
   (Settings → General → Language); see [Interface language](#interface-language)
   for how the dictionaries are registered.

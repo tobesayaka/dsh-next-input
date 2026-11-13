@@ -1,7 +1,7 @@
 # dsh-next-input：Max 模式设计文档
 
 > 状态：**三个步骤全部实现**。日期：2026-11-13
-> 适用版本：dsh-next-input 0.5.2（`src/index.js` / `src/client.js` 现状）
+> 适用版本：dsh-next-input 0.6.0（`src/index.js` / `src/client.js` 现状）
 >
 > 实施进度：
 > - [x] 步骤 1 开关骨架：8 个键读写、设置页 `Max 模式` 分区、子项锁定、旧配置兼容 —— 提交 `773798f`（测试 `33071c1`）
