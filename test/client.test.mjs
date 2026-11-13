@@ -454,6 +454,24 @@ function pageHarness(page) {
   return { api, render, settle };
 }
 
+function textOf(tree) {
+  const found = [];
+  const walk = (node) => {
+    if (typeof node === 'string') {
+      found.push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (node === null || typeof node !== 'object') return;
+    walk(node.children);
+  };
+  walk(tree);
+  return found;
+}
+
 function labelsOf(tree) {
   const found = [];
   const walk = (node) => {
@@ -514,6 +532,11 @@ test('renders the Max mode section with its sub-switches locked while off', asyn
   }
   // The timeout is not a Max mode budget, so it stays editable outside it.
   assert.equal(controls.get('Timeout (ms)').disabled, false, 'the timeout stays editable');
+  // Each budget shows the range the Host accepts next to the input.
+  const texts = textOf(tree);
+  for (const range of ['Range 64–4096', 'Range 1000–50000', 'Range 2–100', 'Range 20–500']) {
+    assert.ok(texts.includes(range), range + ' renders');
+  }
 });
 
 function longConversation(turns) {
