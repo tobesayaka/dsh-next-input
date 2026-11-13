@@ -511,3 +511,54 @@ test('renders the Max mode section with its sub-switches locked while off', asyn
     assert.equal(controls.get(label).disabled, true, label + ' is locked while Max mode is off');
   }
 });
+
+function longConversation(turns) {
+  const messages = [];
+  for (let turn = 0; turn < turns; turn += 1) {
+    messages.push({ role: 'user', text: '第' + turn + '轮：帮我修改 src/client.js 里的预测调度逻辑' });
+    messages.push({
+      role: 'assistant',
+      text: ('## 修改说明\n```js\n' + 'function schedule(){ /* retry */ }\n'.repeat(60) + '```\n\n已完成。').slice(0, 4000),
+    });
+  }
+  return messages;
+}
+
+test('smart packing keeps the opening request that the old packing loses', () => {
+  const client = loadClient(makeStorage());
+  const messages = longConversation(6);
+
+  const old = client.__test.packConversation(messages, 7000, 24);
+  const smart = client.__test.packConversationSmart(messages, 7000, 24);
+
+  // The old packing spends the whole budget on recent answers and drops the
+  // first request entirely.
+  assert.ok(!old.some((message) => message.text.startsWith('第0轮')));
+  // The new one reserves it, so the predictor still knows the goal.
+  assert.ok(smart.some((message) => message.text.startsWith('第0轮')));
+  assert.equal(smart[0].role, 'user');
+  assert.ok(smart.reduce((total, message) => total + message.text.length, 0) <= 7000);
+});
+
+test('smart packing keeps the final answer and the request that produced it', () => {
+  const client = loadClient(makeStorage());
+  const messages = [
+    { role: 'user', text: 'go' },
+    { role: 'assistant', text: 'x'.repeat(500) },
+    { role: 'user', text: 'the uploader retries forever, fix it' },
+    { role: 'assistant', text: 'y'.repeat(8000) },
+  ];
+  const smart = client.__test.packConversationSmart(messages, 4000, 24);
+  assert.ok(smart.some((message) => message.text === 'the uploader retries forever, fix it'));
+  const last = smart[smart.length - 1];
+  assert.equal(last.role, 'assistant');
+  assert.ok(last.text.endsWith('y'.repeat(50)), 'the answer keeps its tail');
+  assert.ok(smart.reduce((total, message) => total + message.text.length, 0) <= 4000);
+});
+
+test('smart packing obeys the message cap', () => {
+  const client = loadClient(makeStorage());
+  const messages = longConversation(20);
+  const smart = client.__test.packConversationSmart(messages, 50000, 5);
+  assert.ok(smart.length <= 5);
+});

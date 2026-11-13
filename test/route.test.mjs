@@ -336,6 +336,18 @@ test('advertises predictOnActivate on cache misses (the default)', async () => {
   const offCache = off.routes.get('/api/next-input.cached');
   const offMissing = await (await offCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
   assert.equal(offMissing.predictOnActivate, false);
+
+  // Max mode's "only predict after an answer" wins over the older switch.
+  const max = install(goodStream, { maxMode: true, predictOnActivate: true });
+  const maxCache = max.routes.get('/api/next-input.cached');
+  const maxMissing = await (await maxCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
+  assert.equal(maxMissing.predictOnActivate, false);
+
+  // While Max mode is off the older switch is the only one that counts.
+  const inert = install(goodStream, { maxMode: false, predictOnActivate: true, predictOnEndOnly: true });
+  const inertCache = inert.routes.get('/api/next-input.cached');
+  const inertMissing = await (await inertCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
+  assert.equal(inertMissing.predictOnActivate, true);
 });
 
 test('uses an explicit fast prediction route when both fields are set', async () => {
@@ -491,7 +503,7 @@ test('loads a settings file written before Max mode existed', async () => {
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).maxMode, undefined);
 });
 
-test('round-trips the Max mode settings without changing a prediction', async () => {
+test('round-trips the Max mode settings and applies them to a prediction', async () => {
   const { route, routes, calls } = install(goodStream);
   const settings = routes.get('/api/next-input.settings');
   const initial = await (await settings.fetch(settingsRequest('GET'))).json();
@@ -506,7 +518,7 @@ test('round-trips the Max mode settings without changing a prediction', async ()
       includeToolActivity: false,
       smartPack: false,
       allowMultiline: false,
-      reasoningEffort: 'high',
+      reasoningEffort: 'low',
       retryOnFailure: false,
       predictOnEndOnly: false,
       promptVariant: 'legacy',
@@ -515,15 +527,15 @@ test('round-trips the Max mode settings without changing a prediction', async ()
   assert.equal(saved.status, 200);
   const body = await saved.json();
   assert.equal(body.values.maxMode, true);
-  assert.equal(body.values.reasoningEffort, 'high');
+  assert.equal(body.values.reasoningEffort, 'low');
   assert.equal(body.values.promptVariant, 'legacy');
   assert.equal(body.values.includeToolActivity, false);
 
   const afterSave = await (await settings.fetch(settingsRequest('GET'))).json();
   assert.equal(afterSave.values.maxMode, true);
 
-  // The skeleton only stores the switches: a prediction keeps the 0.5.x
-  // request even with Max mode on and every sub-switch flipped.
+  // With Max mode on, the pinned effort is requested and the legacy prompt
+  // still wins because `promptVariant` names it.
   const response = await route.fetch(requestFor(conversation));
   assert.equal(response.status, 200);
   assert.equal(calls.length, 1);
@@ -531,11 +543,84 @@ test('round-trips the Max mode settings without changing a prediction', async ()
   assert.equal(calls[0].maxTokens, 512);
   assert.match(calls[0].options.messages[0].content[0].text, /Predict the user's next message now\./);
   assert.doesNotMatch(calls[0].options.messages[0].content[0].text, /tool_activity/u);
+  assert.match(calls[0].options.system, /Keep it short: one or two sentences/u);
 
   for (const value of ['fast', 'MAX', '']) {
     const rejected = await settings.fetch(settingsRequest('POST', { values: { reasoningEffort: value } }));
     assert.equal(rejected.status, 400, 'reasoningEffort ' + JSON.stringify(value) + ' is not a mode');
   }
+});
+
+test('Max mode sends the next prompt and stops pinning the lowest effort', async () => {
+  const { route, calls } = install(goodStream, { maxMode: true });
+  const response = await route.fetch(requestFor(conversation));
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  // 'model' means "let the provider decide", so no effort is requested.
+  assert.equal(calls[0].reasoningEffort, undefined);
+  assert.match(calls[0].options.system, /Match the length of the user's own messages/u);
+  assert.doesNotMatch(calls[0].options.system, /Keep it short: one or two sentences/u);
+});
+
+test('Max mode keeps a multiline prediction on a line boundary', async () => {
+  async function* multilineStream() {
+    yield { type: 'text-delta', index: 0, text: 'Two things:\n' };
+    yield { type: 'text-delta', index: 1, text: '1. run the tests\n2. update the changelog\n' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  const { route } = install(multilineStream, { maxMode: true });
+  const body = await (await route.fetch(requestFor(conversation))).json();
+  assert.equal(body.suggestion, 'Two things:\n1. run the tests\n2. update the changelog');
+});
+
+test('Max mode cuts a multiline prediction at the last full line', async () => {
+  async function* longStream() {
+    yield { type: 'text-delta', index: 0, text: 'first line here\nsecond line here\nthird line here\nfourth line' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  const { route } = install(longStream, { maxMode: true, maxSuggestionChars: 34 });
+  const body = await (await route.fetch(requestFor(conversation))).json();
+  assert.equal(body.suggestion, 'first line here\nsecond line here');
+});
+
+test('turning Max mode off keeps the 0.5.x single-line prediction', async () => {
+  async function* multilineStream() {
+    yield { type: 'text-delta', index: 0, text: 'first line\nsecond line' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  const { route } = install(multilineStream, { maxMode: false });
+  const body = await (await route.fetch(requestFor(conversation))).json();
+  assert.equal(body.suggestion, 'first line second line');
+});
+
+test('Max mode retries once after a failed attempt', async () => {
+  let attempts = 0;
+  async function* flakyStream() {
+    attempts += 1;
+    if (attempts === 1) {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'transient' } } };
+      return;
+    }
+    yield { type: 'text-delta', index: 0, text: 'Run the uploader tests.' };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  const { route } = install(flakyStream, { maxMode: true });
+  const response = await route.fetch(requestFor({ ...conversation, answerKey: 'seq:retry' }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).suggestion, 'Run the uploader tests.');
+  assert.equal(attempts, 2);
+});
+
+test('without Max mode a failed attempt is not retried', async () => {
+  let attempts = 0;
+  async function* flakyStream() {
+    attempts += 1;
+    yield { type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'transient' } } };
+  }
+  const { route } = install(flakyStream, { maxMode: false });
+  const response = await route.fetch(requestFor(conversation));
+  assert.equal(response.status, 502);
+  assert.equal(attempts, 1);
 });
 
 async function* meteredStream() {
@@ -616,4 +701,21 @@ test('counts a second in-flight prediction for the same answer without calling t
   const usage = await (await usageRoute.fetch(new Request('http://127.0.0.1:65488/api/next-input.usage'))).json();
   assert.equal(usage.usage.calls, 1);
   assert.equal(usage.usage.duplicate, 1);
+});
+
+test('Max mode gives a multiline suggestion room by default', async () => {
+  async function* longStream() {
+    yield { type: 'text-delta', index: 0, text: Array.from({ length: 12 }, (_v, i) => 'line ' + i + ' of a longer follow-up').join('\n') };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  }
+  // The settings default (140) would cut this list; Max mode uses its own cap.
+  const max = install(longStream, { maxMode: true });
+  const body = await (await max.route.fetch(requestFor(conversation))).json();
+  assert.ok(body.suggestion.length > 140, 'the default single-line cap no longer applies');
+  assert.ok(body.suggestion.includes('\n'));
+
+  // An explicit cap from the settings page still wins.
+  const capped = install(longStream, { maxMode: true, maxSuggestionChars: 60 });
+  const cappedBody = await (await capped.route.fetch(requestFor(conversation))).json();
+  assert.ok(cappedBody.suggestion.length <= 60);
 });
