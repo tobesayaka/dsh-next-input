@@ -1160,6 +1160,13 @@ window.__ModuleLoader__.load({
         padding: '9px 0',
         borderBottom: '0.5px solid var(--dsw-alias-border-l1)',
       };
+      // Sub-switches of Max mode read as belonging to the master switch above
+      // them, so they are indented and lose their own hairline.
+      const SUB_ROW = {
+        ...ROW,
+        paddingLeft: 16,
+        borderBottom: 'none',
+      };
       const STACK = { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 };
       const LABEL = { fontSize: 13, lineHeight: '20px' };
       const HINT = { fontSize: 11.5, lineHeight: '17px', color: 'var(--dsw-alias-label-secondary)' };
@@ -1278,6 +1285,14 @@ window.__ModuleLoader__.load({
           maxMessages: String(values !== null && values !== undefined ? values.maxMessages : ''),
           maxTokens: String(values !== null && values !== undefined ? values.maxTokens : ''),
           timeoutMs: String(values !== null && values !== undefined ? values.timeoutMs : ''),
+          maxMode: values !== null && values !== undefined && values.maxMode === true,
+          includeToolActivity: values !== null && values !== undefined && values.includeToolActivity === true,
+          smartPack: values !== null && values !== undefined && values.smartPack === true,
+          allowMultiline: values !== null && values !== undefined && values.allowMultiline === true,
+          reasoningEffort: values !== null && values !== undefined && typeof values.reasoningEffort === 'string' ? values.reasoningEffort : 'model',
+          retryOnFailure: values !== null && values !== undefined && values.retryOnFailure === true,
+          predictOnEndOnly: values !== null && values !== undefined && values.predictOnEndOnly === true,
+          promptVariant: values !== null && values !== undefined && typeof values.promptVariant === 'string' ? values.promptVariant : 'next',
         };
       }
 
@@ -1373,6 +1388,16 @@ window.__ModuleLoader__.load({
           values.predictOnActivate = form.predictOnActivate === true;
           values.predictionProvider = provider;
           values.predictionModel = model;
+          // Max mode is saved even while it is off, so each sub-switch keeps
+          // the choice the user made for the next time the master switch is on.
+          values.maxMode = form.maxMode === true;
+          values.includeToolActivity = form.includeToolActivity === true;
+          values.smartPack = form.smartPack === true;
+          values.allowMultiline = form.allowMultiline === true;
+          values.reasoningEffort = form.reasoningEffort;
+          values.retryOnFailure = form.retryOnFailure === true;
+          values.predictOnEndOnly = form.predictOnEndOnly === true;
+          values.promptVariant = form.promptVariant;
           setSaving(true);
           setError('');
           setSaved(false);
@@ -1497,12 +1522,12 @@ window.__ModuleLoader__.load({
           ]);
         };
 
-        const toggle = (label, checked, onToggle) => React.createElement('button', {
+        const toggle = (label, checked, onToggle, locked) => React.createElement('button', {
           type: 'button',
           role: 'switch',
           'aria-label': label,
           'aria-checked': checked === true,
-          disabled: saving,
+          disabled: saving || locked === true,
           onClick: () => onToggle(checked !== true),
           style: {
             flex: 'none',
@@ -1515,8 +1540,8 @@ window.__ModuleLoader__.load({
             background: checked === true ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-2)',
             boxShadow: 'inset 0 0 0 0.5px var(--dsw-alias-border-l1)',
             transition: 'background 120ms ease',
-            cursor: saving ? 'default' : 'pointer',
-            opacity: saving ? 0.6 : 1,
+            cursor: saving || locked === true ? 'default' : 'pointer',
+            opacity: saving || locked === true ? 0.6 : 1,
           },
         }, React.createElement('span', {
           style: {
@@ -1533,12 +1558,12 @@ window.__ModuleLoader__.load({
           },
         }));
 
-        const switchRow = (label, hint, checked, onToggle) => React.createElement('div', { style: ROW },
+        const switchRow = (label, hint, checked, onToggle, rowStyle, locked) => React.createElement('div', { style: rowStyle === undefined ? ROW : rowStyle },
           React.createElement('div', { style: STACK },
             React.createElement('div', { style: LABEL }, label),
             hint === '' ? null : React.createElement('div', { style: HINT }, hint),
           ),
-          toggle(label, checked, onToggle),
+          toggle(label, checked, onToggle, locked),
         );
 
         const inputRow = (label, hint, key, numeric, width) => React.createElement('div', { style: ROW },
@@ -1579,6 +1604,62 @@ window.__ModuleLoader__.load({
           React.createElement('div', { style: SECTION_TITLE }, title),
           rows,
         );
+
+        const enumRow = (label, hint, key, values, labels) => React.createElement('div', { style: SUB_ROW },
+          React.createElement('div', { style: STACK },
+            React.createElement('div', { style: LABEL }, label),
+            hint === '' ? null : React.createElement('div', { style: HINT }, hint),
+          ),
+          React.createElement('select', {
+            value: form[key],
+            'aria-label': label,
+            disabled: saving || form.maxMode !== true,
+            onChange: (event) => update(key, event.target.value),
+            style: {
+              ...INPUT,
+              width: 160,
+              padding: '0 6px',
+              opacity: form.maxMode === true ? 1 : 0.6,
+            },
+          }, values.map((value) => React.createElement('option', {
+            key: value,
+            value,
+          }, labels[value]))),
+        );
+
+        const subSwitch = (labelKey, hintKey, key) => switchRow(
+          t(labelKey),
+          t(hintKey),
+          form[key] === true,
+          (value) => update(key, value),
+          SUB_ROW,
+          form.maxMode !== true,
+        );
+
+        // The skeleton is wired end to end, but every sub-switch still routes
+        // to the 0.5.x behaviour: the Host only reads them once a later step
+        // implements what each one turns on.
+        const maxModeSection = () => section(t('sectionMax'), [
+          switchRow(t('maxModeLabel'), t('maxModeHint'), form.maxMode, (value) => update('maxMode', value)),
+          subSwitch('includeToolActivityLabel', 'includeToolActivityHint', 'includeToolActivity'),
+          subSwitch('smartPackLabel', 'smartPackHint', 'smartPack'),
+          subSwitch('allowMultilineLabel', 'allowMultilineHint', 'allowMultiline'),
+          enumRow(t('reasoningEffortLabel'), t('reasoningEffortHint'), 'reasoningEffort',
+            ['model', 'low', 'medium', 'high'], {
+              model: t('effortModel'),
+              low: t('effortLow'),
+              medium: t('effortMedium'),
+              high: t('effortHigh'),
+            }),
+          subSwitch('retryOnFailureLabel', 'retryOnFailureHint', 'retryOnFailure'),
+          subSwitch('predictOnEndOnlyLabel', 'predictOnEndOnlyHint', 'predictOnEndOnly'),
+          enumRow(t('promptVariantLabel'), t('promptVariantHint'), 'promptVariant',
+            ['legacy', 'next'], {
+              legacy: t('variantLegacy'),
+              next: t('variantNext'),
+            }),
+          React.createElement('div', { style: HINT }, t('maxModeInert')),
+        ]);
 
         if (loading) {
           return column([
@@ -1682,6 +1763,7 @@ window.__ModuleLoader__.load({
             inputRow(t('maxMessagesLabel'), '', 'maxMessages', true),
             inputRow(t('maxSuggestionCharsLabel'), '', 'maxSuggestionChars', true),
           ]),
+          maxModeSection(),
           usageSection(),
           React.createElement('div', { style: ACTIONS },
             React.createElement('button', {
@@ -1722,6 +1804,30 @@ window.__ModuleLoader__.load({
         sectionModel: '模型与延迟',
         sectionContext: '上下文与输出',
         sectionUsage: '用量（本次 Host 运行）',
+        sectionMax: 'Max 模式',
+        maxModeLabel: '启用 Max 模式',
+        maxModeHint: '对标 Codex 预测的改进，按下面的子项生效。关闭时完全使用当前逻辑，行为不变。',
+        maxModeInert: '子项目前只保存选择，所有预测仍走当前逻辑；每一项的对标实现会逐个接入。',
+        includeToolActivityLabel: '带上工具活动',
+        includeToolActivityHint: '把这一轮跑过的命令、读写的文件和执行的测试一并送入预测。',
+        smartPackLabel: '改进上下文打包',
+        smartPackHint: '按字符估算重新分配预算，保证最早那一轮提问不会被挤掉。',
+        allowMultilineLabel: '允许多行建议',
+        allowMultilineHint: '不再压成单行、不再按 140 字符硬截，多行建议按行边界收尾。',
+        reasoningEffortLabel: '推理档位',
+        reasoningEffortHint: '“模型默认”不再强制最低档；其余选项指定固定档位。',
+        effortModel: '模型默认',
+        effortLow: '低',
+        effortMedium: '中',
+        effortHigh: '高',
+        retryOnFailureLabel: '失败后重试',
+        retryOnFailureHint: '一次失败后按退避再试一次，整体仍受上面的超时限制。',
+        predictOnEndOnlyLabel: '只在回答结束后预测',
+        predictOnEndOnlyHint: '忽略“打开会话时预生成”，减少一次模型调用。',
+        promptVariantLabel: '预测提示词',
+        promptVariantHint: '“新版”要求引用本轮的具体对象，并跟随你平时的写法长度。',
+        variantLegacy: '当前版',
+        variantNext: '新版',
         usageCalls: '预测调用次数',
         usageTokens: '消耗 token',
         usageAverage: '平均每次',
@@ -1775,6 +1881,30 @@ window.__ModuleLoader__.load({
         sectionModel: 'Model & latency',
         sectionContext: 'Context & output',
         sectionUsage: 'Usage (this Host session)',
+        sectionMax: 'Max mode',
+        maxModeLabel: 'Enable Max mode',
+        maxModeHint: 'The improvements modelled on Codex predictions, each gated below. While off, predictions use the current logic and behaviour does not change.',
+        maxModeInert: 'Sub-switches only store the choice for now; every prediction still uses the current logic until each one is implemented.',
+        includeToolActivityLabel: 'Include tool activity',
+        includeToolActivityHint: 'Send the commands, files and tests this turn touched along with the prediction request.',
+        smartPackLabel: 'Improved context packing',
+        smartPackHint: 'Rebalance the character budget so the earliest request is never crowded out.',
+        allowMultilineLabel: 'Allow multiline suggestions',
+        allowMultilineHint: 'Stop collapsing to one line and cutting at 140 characters; trim multiline suggestions on a line boundary.',
+        reasoningEffortLabel: 'Reasoning effort',
+        reasoningEffortHint: '“Model default” stops forcing the lowest effort; the other options pin a level.',
+        effortModel: 'Model default',
+        effortLow: 'Low',
+        effortMedium: 'Medium',
+        effortHigh: 'High',
+        retryOnFailureLabel: 'Retry on failure',
+        retryOnFailureHint: 'Retry once after a backoff; the timeout above still bounds the whole attempt.',
+        predictOnEndOnlyLabel: 'Only predict after an answer',
+        predictOnEndOnlyHint: 'Ignore “Predict on session open” and save one model call.',
+        promptVariantLabel: 'Prediction prompt',
+        promptVariantHint: '“New” asks for specifics from this turn and follows how long your own messages usually are.',
+        variantLegacy: 'Current',
+        variantNext: 'New',
         usageCalls: 'Prediction calls',
         usageTokens: 'Tokens used',
         usageAverage: 'Avg per call',

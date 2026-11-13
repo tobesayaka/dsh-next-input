@@ -45,7 +45,38 @@ const DEFAULTS = {
    */
   predictionProvider: '',
   predictionModel: '',
+  /**
+   * Max mode skeleton. `maxMode` is off by default, and while it is off every
+   * key below is inert: nothing reads them, so predictions keep the 0.5.x
+   * behaviour byte for byte. The sub-switches are stored and editable now so
+   * each improvement can land behind its own flag later.
+   */
+  maxMode: false,
+  includeToolActivity: true,
+  smartPack: true,
+  allowMultiline: true,
+  /** `model` lets the model use its own default effort instead of the lowest. */
+  reasoningEffort: 'model',
+  retryOnFailure: true,
+  predictOnEndOnly: true,
+  promptVariant: 'next',
 };
+
+/** Allowed values for the enum settings; string settings are not ranges. */
+const SETTINGS_ENUMS = {
+  reasoningEffort: ['model', 'low', 'medium', 'high'],
+  promptVariant: ['legacy', 'next'],
+};
+
+/** Boolean settings other than the two that predate Max mode. */
+const SETTINGS_BOOLEANS = new Set([
+  'maxMode',
+  'includeToolActivity',
+  'smartPack',
+  'allowMultiline',
+  'retryOnFailure',
+  'predictOnEndOnly',
+]);
 
 /**
  * Pick the provider/model one prediction calls.
@@ -106,6 +137,14 @@ const SETTINGS_KEYS = new Set([
   'predictOnActivate',
   'predictionProvider',
   'predictionModel',
+  'maxMode',
+  'includeToolActivity',
+  'smartPack',
+  'allowMultiline',
+  'reasoningEffort',
+  'retryOnFailure',
+  'predictOnEndOnly',
+  'promptVariant',
 ]);
 
 function settingsPath() {
@@ -128,8 +167,15 @@ function normalizeSettings(input, current) {
   for (const key of Object.keys(input)) {
     if (!SETTINGS_KEYS.has(key)) return { error: 'unknown_setting', field: key };
     const value = input[key];
-    if (key === 'enterToSend' || key === 'predictOnActivate') {
+    if (key === 'enterToSend' || key === 'predictOnActivate' || SETTINGS_BOOLEANS.has(key)) {
       if (typeof value !== 'boolean') return { error: 'invalid_setting', field: key };
+      values[key] = value;
+      continue;
+    }
+    if (SETTINGS_ENUMS[key] !== undefined) {
+      if (typeof value !== 'string' || !SETTINGS_ENUMS[key].includes(value)) {
+        return { error: 'invalid_setting', field: key };
+      }
       values[key] = value;
       continue;
     }
@@ -741,7 +787,13 @@ export function apply(ctx, config = {}) {
       continue;
     }
     if (typeof DEFAULTS[key] === 'string') {
-      if (typeof value === 'string') options[key] = value.trim();
+      if (typeof value !== 'string') continue;
+      const text = value.trim();
+      // An enum key accepts only its declared values, so a typo in the plugin
+      // config cannot silently pick a fourth, unimplemented mode.
+      if (SETTINGS_ENUMS[key] === undefined || SETTINGS_ENUMS[key].includes(text)) {
+        options[key] = text;
+      }
       continue;
     }
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
