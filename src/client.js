@@ -19,6 +19,9 @@ window.__ModuleLoader__.load({
     const GHOST_ATTR = 'data-dsh-next-input-ghost-on';
     const MAX_CONTEXT_CHARS = 7000;
     const MAX_MESSAGES = 24;
+    // Tool activity is orientation, not a transcript: keep it small enough to
+    // leave the conversation budget intact.
+    const MAX_TOOL_ACTIVITY_CHARS = 1200;
     const SETTLE_DELAY_MS = 50;
     const EMPTY = [];
 
@@ -166,6 +169,172 @@ window.__ModuleLoader__.load({
         }
       }
       return parts.join('\n\n');
+    }
+
+    /** Tools whose arguments point at a file, reported by path. */
+    const FILE_TOOLS = new Set(['read', 'view', 'view_image', 'write', 'create', 'edit', 'str_replace', 'apply_patch']);
+    /** How many command lines one tool keeps before older ones are counted. */
+    const COMMAND_LINES_PER_TOOL = 4;
+
+    /**
+     * One readable row per tool call: what the assistant actually did.
+     *
+     * `arguments` arrives as the raw JSON string the model produced, so a
+     * malformed value falls back to the bare tool name instead of throwing.
+     * The goal is orientation ("it edited src/client.js and ran the tests"),
+     * not fidelity: results are reduced to a failure marker.
+     * @param {unknown} rawName
+     * @param {unknown} raw
+     * @returns {{ tool: string, target: string, line: string }}
+     */
+    function toolArgumentsSummary(rawName, raw) {
+      const tool = typeof rawName === 'string' && rawName !== '' ? rawName : 'tool';
+      let args = null;
+      if (typeof raw === 'string' && raw.trim() !== '') {
+        try {
+          args = JSON.parse(raw);
+        } catch {
+          args = null;
+        }
+      } else if (raw !== null && typeof raw === 'object') {
+        args = raw;
+      }
+      const pick = (...keys) => {
+        if (args === null || typeof args !== 'object') return '';
+        for (const key of keys) {
+          const value = args[key];
+          if (typeof value === 'string' && value.trim() !== '') return value.trim();
+        }
+        return '';
+      };
+      const clip = (text, limit) => (text.length > limit ? text.slice(0, limit) + '…' : text);
+      // The transcript names files the way the assistant did (relative to the
+      // workspace); an absolute path from a tool argument would not match it.
+      // Keeping the last two segments lands on the same file in practice.
+      const shortPath = (value) => {
+        if (!value.startsWith('/')) return clip(value, 160);
+        const parts = value.split('/').filter((part) => part !== '');
+        return parts.length <= 2 ? value : '…/' + parts.slice(-2).join('/');
+      };
+
+      if (FILE_TOOLS.has(tool)) {
+        const path = pick('path', 'file_path', 'filePath', 'file');
+        const target = path === '' ? tool : tool + ' ' + shortPath(path);
+        return { tool, target, line: target };
+      }
+      if (tool === 'bash' || tool === 'shell') {
+        const command = pick('command', 'cmd');
+        const line = command === '' ? tool : tool + ': ' + clip(command.replace(/\s+/gu, ' '), 160);
+        return { tool, target: line, line };
+      }
+      if (tool === 'grep' || tool === 'search' || tool === 'glob' || tool === 'find') {
+        const pattern = pick('pattern', 'query', 'glob');
+        const path = pick('path', 'directory', 'cwd');
+        const where = path === '' ? '' : ' in ' + clip(path, 100);
+        const line = pattern === '' ? tool + where : tool + ' ' + clip(pattern, 100) + where;
+        return { tool, target: line, line };
+      }
+      const first = pick('description', 'command', 'path', 'file_path', 'query', 'pattern');
+      const line = first === '' ? tool : tool + ': ' + clip(first.replace(/\s+/gu, ' '), 140);
+      return { tool, target: line, line };
+    }
+
+    /**
+     * Tool activity of the latest answer's turn, as a short text block for the
+     * predictor. Only the last turn is summarised: older activity is already
+     * reflected in what the assistant said, and the point here is "what just
+     * happened".
+     * @param {Array<any>} entries
+     * @returns {string}
+     */
+    function toolActivitySummary(entries, maxChars) {
+      // Find the seq of the latest assistant message, then everything from the
+      // turn start of that answer is the activity to summarise.
+      let lastAssistantSeq = -1;
+      let lastTurnStartSeq = -1;
+      for (const entry of entries) {
+        if (entry === null || entry === undefined || entry.type !== 'event') continue;
+        const event = entry.event;
+        if (event === null || event === undefined) continue;
+        if (event.type === 'assistant/message' && typeof event.seq === 'number') {
+          lastAssistantSeq = event.seq;
+        }
+        if (event.type === 'turn/start' && typeof event.seq === 'number') {
+          lastTurnStartSeq = event.seq;
+        }
+      }
+      if (lastAssistantSeq < 0) return '';
+
+      const calls = new Map();
+      const order = [];
+      for (const entry of entries) {
+        if (entry === null || entry === undefined || entry.type !== 'event') continue;
+        const event = entry.event;
+        if (event === null || event === undefined) continue;
+        const seq = typeof event.seq === 'number' ? event.seq : -1;
+        if (seq < 0 || seq > lastAssistantSeq) continue;
+        if (lastTurnStartSeq >= 0 && seq < lastTurnStartSeq) continue;
+        const data = event.data;
+        if (data === null || typeof data !== 'object') continue;
+        if (event.type === 'tool/call') {
+          const callId = typeof data.callId === 'string' ? data.callId : '';
+          const row = toolArgumentsSummary(data.name, data.arguments);
+          calls.set(callId, { ...row, failed: false });
+          order.push(callId);
+        } else if (event.type === 'tool/result') {
+          const callId = typeof data.callId === 'string'
+            ? data.callId
+            : (data.message !== null && typeof data.message === 'object' && typeof data.message.toolCallId === 'string'
+              ? data.message.toolCallId
+              : '');
+          const entryRow = calls.get(callId);
+          const message = data.message !== null && typeof data.message === 'object' ? data.message : null;
+          const failed = data.error !== undefined && data.error !== null
+            || (message !== null && message.isError === true);
+          if (entryRow !== undefined) entryRow.failed = failed;
+          else {
+            // A result whose call fell outside the window: the tool name is
+            // the only thing left to report.
+            calls.set(callId, { ...toolArgumentsSummary(data.name, null), failed });
+            order.push(callId);
+          }
+        }
+      }
+      if (order.length === 0) return '';
+
+      // Group by tool so a turn that ran thirty commands still reports which
+      // files it read and edited. Files are what the next message usually
+      // refers to, so they survive; commands are kept to the most recent few.
+      const byTool = new Map();
+      for (const callId of order) {
+        const row = calls.get(callId);
+        const tool = row.tool;
+        if (!byTool.has(tool)) byTool.set(tool, []);
+        byTool.get(tool).push(row);
+      }
+      const lines = [];
+      for (const [tool, rows] of byTool) {
+        if (FILE_TOOLS.has(tool)) {
+          const seen = new Set();
+          for (const row of rows) {
+            if (seen.has(row.target)) continue;
+            seen.add(row.target);
+            lines.push('-' + ' ' + row.target + (row.failed ? ' [failed]' : ''));
+          }
+          continue;
+        }
+        const recent = rows.slice(-COMMAND_LINES_PER_TOOL);
+        if (recent.length < rows.length) lines.push('-' + ' ' + tool + ': ' + (rows.length - recent.length) + ' earlier calls');
+        for (const row of recent) {
+          lines.push('-' + ' ' + row.line + (row.failed ? ' [failed]' : ''));
+        }
+      }
+      const body = lines.join('\n');
+      if (body.length <= maxChars) return body;
+      // Cut on a line boundary: half a command reads as a different command.
+      const cut = body.slice(0, maxChars);
+      const boundary = cut.lastIndexOf('\n');
+      return (boundary > 0 ? cut.slice(0, boundary) : cut) + '\n- …';
     }
 
     /**
@@ -365,7 +534,10 @@ window.__ModuleLoader__.load({
       const messages = smart
         ? packConversationSmart(all, MAX_CONTEXT_CHARS, MAX_MESSAGES)
         : packConversation(all, MAX_CONTEXT_CHARS, MAX_MESSAGES);
-      return { messages, model, answerKey };
+      const withTools = maxSettings !== null && maxSettings !== undefined
+        && maxSettings.maxMode === true && maxSettings.includeToolActivity === true;
+      const toolActivity = withTools ? toolActivitySummary(snapshot.entries, MAX_TOOL_ACTIVITY_CHARS) : '';
+      return { messages, model, answerKey, toolActivity };
     }
 
     /** The Lexical root the overlay is anchored to. */
@@ -627,6 +799,9 @@ window.__ModuleLoader__.load({
               sessionId: session,
               answerKey: conversation.answerKey ?? '',
               messages: conversation.messages,
+              ...(conversation.toolActivity === undefined || conversation.toolActivity === ''
+                ? {}
+                : { toolActivity: conversation.toolActivity }),
             }),
             signal: controller.signal,
           });
@@ -680,6 +855,7 @@ window.__ModuleLoader__.load({
             maxRef.current = {
               maxMode: data.values.maxMode === true,
               smartPack: data.values.smartPack === true,
+              includeToolActivity: data.values.includeToolActivity === true,
             };
           } catch {
             // Keep the fallback packing.
@@ -2114,7 +2290,7 @@ window.__ModuleLoader__.load({
       },
     };
     if (typeof window !== 'undefined' && window.__DSH_NEXT_INPUT_TEST__ === true) {
-      api.__test = { readConversation, readSelection, packConversation, packConversationSmart };
+      api.__test = { readConversation, readSelection, packConversation, packConversationSmart, toolActivitySummary };
     }
     return api;
   },
