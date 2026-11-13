@@ -1,12 +1,12 @@
 # dsh-next-input：Max 模式设计文档
 
-> 状态：**第 1 步（开关骨架）已实现**，其余步骤仍是设计。日期：2026-11-13
+> 状态：**步骤 1、2 已实现**，步骤 3 仍是设计。日期：2026-11-13
 > 适用版本：dsh-next-input 0.5.2（`src/index.js` / `src/client.js` 现状）
 >
 > 实施进度：
 > - [x] 步骤 1 开关骨架：8 个键读写、设置页 `Max 模式` 分区、子项锁定、旧配置兼容 —— 提交 `773798f`（测试 `33071c1`）
-> - [ ] 步骤 2 G2 / G3 / G4 / G5 / G8
-> - [ ] 步骤 3 G1 / G6
+> - [x] 步骤 2 G2 / G3 / G4 / G5 / G8，外加 `predictOnEndOnly` 真正生效
+> - [ ] 步骤 3 G1 工具活动上下文（`includeToolActivity` 仍只是保存，未接入）
 
 ## 0. 一句话
 
@@ -247,11 +247,12 @@ Rules:
 
 以下需要你先拍板，文档不擅自定：
 
-1. ~~**`maxMode` 默认状态**~~ —— **已定：默认关**（步骤 1 已按此实现）。
-2. ~~**`smartPack` 的 token 估算**~~ —— **已定：先用字符估算**（步骤 2 实现）。
-3. **G1 的数据来源**：DSH 事件窗口里，工具调用是否像 text 块一样可读？需要在实现前先确认 API，否则只能退化成"读工具结果里的文本"。
-4. **单行约束的产品意图**：`allowMultiline` 与 `README` 里"压到像真人随手一写的长度"是否有冲突？如果冲突，需要先修目标描述。
-5. **G9 是否进第一版**：没有度量就只能靠感觉验收，但度量本身要设计埋点。
+1. ~~**`maxMode` 默认状态**~~ —— **已定：默认关**。
+2. ~~**`smartPack` 的 token 估算**~~ —— **已定：先用字符估算**。
+3. ~~**单行约束的产品意图**~~ —— **已定：多行算达标**；仓库根 `README.md` 的判据已同步。
+4. ~~**多行建议的长度上限**~~ —— **已定：Max 模式用 400，显式设置优先**。
+5. **G1 的数据来源**（步骤 3 的前置）：DSH 事件窗口里，工具调用是否像 text 块一样可读？需要在实现前先确认 API，否则只能退化成"读工具结果里的文本"。
+6. **G9 是否进第一版**：没有度量就只能靠感觉验收，但度量本身要设计埋点。
 
 ## 4.1 步骤 1 的实现记录
 
@@ -264,6 +265,27 @@ Rules:
 | 中英文案 | `zhDictionary` / `enDictionary` 各加 **24** 个键（两份字典各 74 个，键集完全一致），已有测试覆盖对称性 |
 
 骨架阶段的**关键约束已验证**：Max 模式开启且所有子项都翻到另一侧后，预测请求仍是 0.5.x 的形态（effort `low`、`maxTokens 512`、旧 user content），由 `test/route.test.mjs` 的 `round-trips the Max mode settings without changing a prediction` 固定。
+
+## 4.2 步骤 2 的实现记录
+
+| 子项 | 落点 | 行为 |
+|---|---|---|
+| G2 `smartPack` | `client.js` `packConversationSmart()`；`readConversation` 按 `maxMode && smartPack` 分支 | 先预留**最早那条提问**（≤20% 预算），再排最后一条回答（≤45%）与它的提问（≤25%）；仍是字符预算 |
+| G3 `allowMultiline` | `index.js` `cleanSuggestion(raw, cap, multiline)`；`predict()` 传 `multiline` | 保留换行、只清理行尾空白与连续空行，超出上限时在**行边界**截断 |
+| G3 上限 | `index.js` `suggestionCapFor()` + `MAX_MODE_SUGGESTION_CHARS = 400` | `maxSuggestionChars` 仍是默认 140 时，Max 模式用 400；用户显式改过则尊重该值 |
+| G4 `reasoningEffort` | `index.js` `reasoningEffortFor()` | 关闭时仍是 `efforts[0]`；`model` 不发该参数；指定档位只在模型声明了才发 |
+| G5 `retryOnFailure` | `index.js` `predict()` 的 `runOnce()` 循环 | 失败后退避 250ms 重试一次，复用同一个 `AbortController`，总时长仍受 `timeoutMs` 约束；每次尝试重置 `text` |
+| G6 `predictOnEndOnly` | `index.js` `readCached()` | Max 模式开启时，缓存查询响应里的 `predictOnActivate` 恒为 `false`，客户端因此不会补预测 |
+| G8 `promptVariant` | `index.js` `SYSTEM_PROMPT_NEXT` + `promptFor()` | 要求引用本轮具体的文件/函数/命令/报错；长度跟随用户自己的消息；允许按需使用多行结构 |
+
+**客户端如何拿到开关**：打包发生在浏览器侧，所以客户端挂载时读一次 `api/next-input.settings`，缓存进 `maxRef`；读失败则保持 `null`，所有预测退回旧打包。改设置后刷新页面生效（与设置页「保存立即应用到下一次预测」相比，打包这一项需要一次刷新）。
+
+**实测对比（G2）**：6 轮、每轮用户 36 字 + 回答 4 000 字的会话，7 000 字符预算下——
+
+- 旧打包：发出 7 条，**第一条是助手回答的中间片段**（从代码块里截断），最早提问完全丢失。
+- 新打包：发出 8 条，**第一条是第 0 轮的提问**，最后一条回答与它的提问都在。
+
+**仍未接入**：`includeToolActivity` 只保存、不生效（步骤 3）。
 
 ## 5. 参考
 
