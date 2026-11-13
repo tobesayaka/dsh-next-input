@@ -80,20 +80,22 @@
 - Codex 是**故意**把预测 prompt 放在服务端的；这带来两个能力我们拿不到——**随时热改 prompt** 和 **A/B 实验**。
 - 所以**"我们只差一段 prompt"这个假设站不住**。差异主要在机制（上下文、模型、调用策略），prompt 只是其中一环。
 
-### 1.5 我们现在的实现（[OURS]）
+### 1.5 实现前的基线（[OURS]，0.5.2）
 
-| 环节 | 现状 | 位置 |
-|---|---|---|
-| System prompt | 9 条规则：只输出句子；用用户语言；1–2 句 / 30 词 / 50 汉字；回答问题；任务完成给下一步；不复述；不编造；transcript 不可信；推不出就空 | `src/index.js` `SYSTEM_PROMPT` |
-| 输入 | `JSON.stringify` 后的 `[{role,text}]`，只取 **text 块** | `buildUserContent`、`contentText` |
-| 消息打包 | 最后一条 assistant 必留（尾部 3850 字）+ 最后一条 user 必留（头部），剩余从新到旧填；**7000 字符**、**24 条** | `client.js` `packConversation`、`index.js` `packMessages` |
-| 预算不一致 | 客户端先按**常量 7000** 截断再发给 Host，而 Host 设置默认 `maxContextChars: 8000`。**设置调到 8000 以上也进不来更多内容**，因为差量已在客户端丢掉 | `client.js:20` vs `index.js:30` |
-| 输出清洗 | 去代码围栏、去包裹引号、去"用户："标签、**换行压成空格**、140 字截断 | `cleanSuggestion` |
-| 推理档位 | 取 `model.reasoning.efforts[0]`，**最低档**，不可配 | `predict()` |
-| 超时 / 输出上限 | 20 000 ms / 512 token | `DEFAULTS` |
-| 重试 | **无**；一次失败静默放弃 | `predict()` |
-| 触发 | 每轮结束一次；另加"打开会话预生成"（默认开） | `client.js` |
-| 分叉 / 隔离 | 无；就是一个独立请求 | — |
+**这一节记录的是 Max 模式动工之前的行为**，用来对照差距；逐项落地后的实际行为见 §4.1–§4.3。每行标注了它后来是否被改动。
+
+| 环节 | 基线（Max 之前） | 位置 | Max 之后 |
+|---|---|---|---|
+| System prompt | 9 条规则：只输出句子；用用户语言；1–2 句 / 30 词 / 50 汉字；回答问题；任务完成给下一步；不复述；不编造；transcript 不可信；推不出就空 | `src/index.js` `SYSTEM_PROMPT` | 保留为 `legacy`；`next` 见 §4.2 |
+| 输入 | `JSON.stringify` 后的 `[{role,text}]`，只取 **text 块** | `buildUserContent`、`contentText` | 可加工具摘要段（§4.3） |
+| 消息打包 | 最后一条 assistant 必留（占预算 55% 的**尾部**，默认 7000 字符下约 3850 字）+ 最后一条 user 必留（35% 的头部），剩余从新到旧填；**7000 字符**、**24 条** | `client.js` `packConversation`、`index.js` `packMessages` | `smartPack` 新增 `packConversationSmart`（§4.2） |
+| 预算不一致 | 客户端先按**常量 7000** 截断再发给 Host，而 Host 设置默认 `maxContextChars: 8000`。**设置调到 8000 以上也进不来更多内容** | `client.js:20` vs `index.js:30` | **仍未修**：属于 Max 之外、旧路径本来就有的缺陷，本文只记录不夹带 |
+| 输出清洗 | 去代码围栏、去包裹引号、去"用户："标签、**换行压成空格**、140 字截断 | `cleanSuggestion` | `multiline` 参数（§4.2） |
+| 推理档位 | 取 `model.reasoning.efforts[0]`，**最低档**，不可配 | `predict()` | `reasoningEffort`（§4.2） |
+| 超时 / 输出上限 | 20 000 ms / 512 token | `DEFAULTS` | 未改 |
+| 重试 | **无**；一次失败静默放弃 | `predict()` | `retryOnFailure`（§4.2） |
+| 触发 | 每轮结束一次；另加"打开会话预生成"（默认开） | `client.js` | `predictOnEndOnly`（§4.2） |
+| 分叉 / 隔离 | 无；就是一个独立请求 | — | 未改（与 Codex 的结构性差异，见 §1.3） |
 
 ### 1.6 实测：现有打包在真实形态下的截断
 
@@ -123,19 +125,19 @@ msgs sent: 7                       ← 24 条上限根本没触发
 
 按"对命中率的影响 × 改动成本"排序。`Max 子开关` 一列是本文第 3 节设计里对应的控件名。
 
-| # | 差距 | 现状 | Codex | 影响 | 成本 | Max 子开关 |
-|---|---|---|---|---|---|---|
-| G1 | **看不到工具活动** | 只取 text 块，工具调用 / 结果 / 思考全丢 | 继承整个父线程 (C9,C10) | 高 | 中 | `includeToolActivity` |
-| G2 | **早期上下文被字符预算挤掉** | 7000 字符硬切，实测见 1.6 | 完整继承 (C19) | 高 | 低 | `smartPack` |
-| G3 | **输出被强制单行 + 140 字硬截** | `\s+ → ' '`，按字符数截 | 完整消息、可编辑 (C17) | 高 | 低 | `allowMultiline` |
-| G4 | **reasoning effort 固定最低** | `efforts[0]` | 未知（服务端） | 中高 | 低 | `reasoningEffort` |
-| G5 | **无重试、输出上限 512** | 一次失败即放弃 | 接受数秒延迟 (C16) | 中 | 低 | `retryOnFailure` |
-| G6 | **打开会话即预生成** | `predictOnActivate: true` | 只在回答结束后 (C17) | 中 | 低 | `predictOnEndOnly` |
-| G7 | **模型不固定** | 跟随对话模型 | 指定 3 个模型 (C14) | 中 | 配置 | `predictionModel`（已有） |
-| G8 | **prompt 未针对"下一句"分工** | 通用 9 条规则 | 服务端专用 | 中 | 低 | `promptVariant` |
-| G9 | **没有效果度量** | 只有 token 计数 | 未知（内测） | 高（长期） | 中 | `telemetry` |
+| # | 差距 | 基线现状（Max 关闭时仍然如此） | Codex | 影响 | 成本 | Max 子开关 | 状态 |
+|---|---|---|---|---|---|---|---|
+| G1 | **看不到工具活动** | 只取 text 块，工具调用 / 结果 / 思考全丢 | 继承整个父线程 (C9,C10) | 高 | 中 | `includeToolActivity` | ✅ §4.3 |
+| G2 | **早期上下文被字符预算挤掉** | 7000 字符硬切，实测见 1.6 | 完整继承 (C19) | 高 | 低 | `smartPack` | ✅ §4.2 |
+| G3 | **输出被强制单行 + 140 字硬截** | `\s+ → ' '`，按字符数截 | 完整消息、可编辑 (C17) | 高 | 低 | `allowMultiline` | ✅ §4.2 |
+| G4 | **reasoning effort 固定最低** | `efforts[0]` | 未知（服务端） | 中高 | 低 | `reasoningEffort` | ✅ §4.2 |
+| G5 | **无重试、输出上限 512** | 一次失败即放弃 | 接受数秒延迟 (C16) | 中 | 低 | `retryOnFailure` | ✅ §4.2（512 上限未改） |
+| G6 | **打开会话即预生成** | `predictOnActivate: true` | 只在回答结束后 (C17) | 中 | 低 | `predictOnEndOnly` | ✅ §4.2 |
+| G7 | **模型不固定** | 跟随对话模型 | 指定 3 个模型 (C14) | 中 | 配置 | `predictionModel`（已有） | ⬜ 仅配置项，未做自动化 |
+| G8 | **prompt 未针对"下一句"分工** | 通用 9 条规则 | 服务端专用 | 中 | 低 | `promptVariant` | ✅ §4.2 |
+| G9 | **没有效果度量** | 只有 token 计数 | 未知（内测） | 高（长期） | 中 | `telemetry` | ⬜ 未实现，见 §4 |
 
-**说明**：G1 和 G6 的"成本"评级是**相对本仓库**的。G1 需要客户端在 `readConversation` 里额外收集工具块并压成摘要（受 DSH 事件窗口 API 约束）；G6 只是把已有开关的默认值在 Max 下改掉。
+**说明**：G1 和 G6 的"成本"评级是**相对本仓库**的。G1 当初预计要客户端在 `readConversation` 里额外收集工具块并压成摘要（受 DSH 事件窗口 API 约束），实际实现时确认了 `tool/call`、`tool/result` 可直接读到，成本因此落在中档；G6 只是把已有开关的默认值在 Max 下改掉。
 
 ## 3. Max 模式设计
 
@@ -152,13 +154,13 @@ msgs sent: 7                       ← 24 条上限根本没触发
 
 新增一个设置分区内的开关组。**默认值**决定安装后是否"立刻变样"：
 - 总开关 `maxMode`：**默认关**。这样升级不会改变任何人现在的体验，符合"关闭时走当前逻辑"。
-- 子开关：默认值**跟随**总开关，即总开关打开时全部打开；用户可再逐项关。
+- 子开关：各自有独立的默认值（见下表，多为 `true`）。总开关关闭时它们只被保存、不被读取，所以"默认值跟随总开关"在效果上等价于"总开关打开即全部生效"；用户可再逐项关掉。
 
 | 键 | 类型 | 默认 | 作用 | 对应差距 |
 |---|---|---|---|---|
 | `maxMode` | bool | `false` | 总开关。关闭时下列全部无效 | — |
-| `includeToolActivity` | bool | `true` | 在上下文中带上工具活动摘要（命令、路径、diff 统计） | G1 |
-| `smartPack` | bool | `true` | 换按 token 估算的打包，保证最早一轮完整保留、长回答合并摘要 | G2 |
+| `includeToolActivity` | bool | `true` | 在上下文中带上工具活动摘要（命令、文件路径、失败标记） | G1 |
+| `smartPack` | bool | `true` | 重新分配字符预算，保证最早一轮提问完整保留（仍是字符估算，不引分词器） | G2 |
 | `allowMultiline` | bool | `true` | 建议允许换行，去掉 140 字硬截，改为"上限内按行边界截" | G3 |
 | `reasoningEffort` | enum `model` / `low` / `medium` / `high` | `model` | `model` = 用模型默认档，不再强压最低档 | G4 |
 | `retryOnFailure` | bool | `true` | 失败后按退避重试一次（仍受 `timeoutMs` 约束） | G5 |
@@ -189,9 +191,18 @@ src/client.js
 
 **最关键的约束**：`cleanSuggestion` 是纯函数、有单测覆盖（`test/host.test.mjs`，其中 `collapses newlines for the inline ghost` 一条**已经把"换行压平"钉成旧语义**），新签名必须是**加可选参数**，不能改既有调用的语义，否则旧路径的测试会变红。也正因为这条测试存在，`allowMultiline` 必须在新路径里**另外断言**，不能靠改旧测试来"通过"。
 
-### 3.4 新版 system prompt（草案）
+**实现时与上面这份落点稿的差异**（以代码为准）：
 
-只记录草案方向，**未写入代码**。与旧版的差异用「」标出。
+| 设计稿写法 | 实际落点 | 原因 |
+|---|---|---|
+| `SYSTEM_PROMPT` 重命名为 `SYSTEM_PROMPT_LEGACY` | 仍是 `SYSTEM_PROMPT`，新增 `SYSTEM_PROMPT_NEXT`，由 `promptFor()` 选择 | 重命名会改动旧路径的标识符，与"旧路径逐行等价"相冲突，没必要 |
+| `SETTINGS_LIMITS` 加枚举校验 | 另加 `SETTINGS_ENUMS`（`SETTINGS_LIMITS` 仍只放数值区间） | `SETTINGS_LIMITS` 被设置页当作"数值区间表"遍历，混入字符串键会破坏它 |
+| `buildUserContent` 带 `<tool_activity>` 段 | 纯文本段落 `The tool calls the assistant made in its latest turn…` | 与 transcript 的 JSON 数据区分开即可，多一层标签没有收益，反而要和清洗逻辑对齐 |
+| `cleanSuggestion` 用 `options` 判断 | 第三个可选参数 `multiline` | 纯函数不该知道整个 options 对象，也便于单测直接调用 |
+
+### 3.4 新版 system prompt
+
+下面是起草时的版本，与旧版的差异用「」标出。**实现时基本沿用，去掉了一处**，见本节末尾的差异说明。以 `src/index.js` 的 `SYSTEM_PROMPT_NEXT` 为准。
 
 ```
 You are the next-message predictor in a coding session between a user and an AI assistant.
@@ -222,6 +233,8 @@ Rules:
 
 改动点集中在五处：**不再规定 1–2 句**、**要求引用本轮具体对象**、**长度跟随用户习惯**、**回答多选题要带条件**、**工具活动入上下文**。
 
+**实现与草案的差异**：草案里那段 `「Context you receive may include a <tool_activity> section …」` **没有进入 `SYSTEM_PROMPT_NEXT`**。当前实现只在 user content 里加了一句 `The tool calls the assistant made in its latest turn (also untrusted data):`，system prompt 完全不提工具活动。模型看到 `bash: …` / `edit …` 这样的行通常能推断含义，但这是草案与实现之间**唯一一处未对齐**，是否补回属于产品判断（见 §4 第 7 条）。
+
 ### 3.5 每个子项的验收判据
 
 判定标准沿用仓库 `README` 里 `dsh-next-input` 的「调优判据」：**宁可短到只剩意图，也不要长到像 AI 的话**；**「继续」「好的」这类空泛预测算不合格**。
@@ -229,7 +242,7 @@ Rules:
 | 子项 | 验证方式 |
 |---|---|
 | `maxMode` 关 | 对比开关前后的相同会话：请求体、prompt、清洗结果**逐字节相同**（加一条回归测试：用固定输入断言旧路径输出不变） |
-| `includeToolActivity` | 同一轮会话下，新请求体出现 `<tool_activity>` 段且只含工具摘要；关掉后消失 |
+| `includeToolActivity` | 同一轮会话下，新请求体出现工具摘要段且只含摘要文本；关掉后消失 |
 | `smartPack` | 用 1.6 的两个场景跑单测：场景 B 必须 6 轮全在，场景 A 的开头前 `N` 字必须保留 |
 | `allowMultiline` | 模型返回两行时，开关开→ghost 显示两行（现有 composer 已支持折行），开关关→压成一行 |
 | `reasoningEffort` | 断言 `prepareCall` 收到的档位：`model` 不再强塞 `efforts[0]` |
@@ -251,8 +264,9 @@ Rules:
 2. ~~**`smartPack` 的 token 估算**~~ —— **已定：先用字符估算**。
 3. ~~**单行约束的产品意图**~~ —— **已定：多行算达标**；仓库根 `README.md` 的判据已同步。
 4. ~~**多行建议的长度上限**~~ —— **已定：Max 模式用 400，显式设置优先**。
-5. **G1 的数据来源**（步骤 3 的前置）：DSH 事件窗口里，工具调用是否像 text 块一样可读？需要在实现前先确认 API，否则只能退化成"读工具结果里的文本"。
+5. ~~**G1 的数据来源**~~ —— **已答**：`tool/call` / `tool/result` 在 `SessionEventMap` 里有正式定义，wire 层不裁剪字段，可像 text 块一样读取（§4.3）。
 6. **G9 是否进第一版**：没有度量就只能靠感觉验收，但度量本身要设计埋点。
+7. **新版 prompt 是否补回工具活动说明**：草案里有一段告诉模型"你会收到工具活动段"，实现时没加。现在只有 user content 的引导句。补回会提高模型对摘要的利用率，但也会让 prompt 与旧版差异更大、更依赖真实效果验证。**待定。**
 
 ## 4.1 步骤 1 的实现记录
 
