@@ -1,12 +1,12 @@
 # dsh-next-input：Max 模式设计文档
 
-> 状态：**步骤 1、2 已实现**，步骤 3 仍是设计。日期：2026-11-13
+> 状态：**三个步骤全部实现**。日期：2026-11-13
 > 适用版本：dsh-next-input 0.5.2（`src/index.js` / `src/client.js` 现状）
 >
 > 实施进度：
 > - [x] 步骤 1 开关骨架：8 个键读写、设置页 `Max 模式` 分区、子项锁定、旧配置兼容 —— 提交 `773798f`（测试 `33071c1`）
 > - [x] 步骤 2 G2 / G3 / G4 / G5 / G8，外加 `predictOnEndOnly` 真正生效
-> - [ ] 步骤 3 G1 工具活动上下文（`includeToolActivity` 仍只是保存，未接入）
+> - [x] 步骤 3 G1 工具活动上下文
 
 ## 0. 一句话
 
@@ -286,6 +286,42 @@ Rules:
 - 新打包：发出 8 条，**第一条是第 0 轮的提问**，最后一条回答与它的提问都在。
 
 **仍未接入**：`includeToolActivity` 只保存、不生效（步骤 3）。
+
+## 4.3 步骤 3 的实现记录（工具活动）
+
+**前置问题已答**：DSH 事件窗口里工具调用**可以**像 text 块一样读到，来源是 `@deepseek-ai/dsh-session/src/types.ts` 的 `SessionEventMap`：
+
+```
+'tool/call': { turn, step, callId, name, arguments }      // arguments 是模型产出的原始 JSON 字符串
+'tool/result': { turn, step, message: ToolResultMessage, error?, meta? }
+```
+
+`@deepseek-ai/dsh-api-session-controller` 的 `assertSessionWireEvent` 只校验信封、**不裁剪字段**，所以这两类事件原样到达客户端。用真实会话日志（`~/.dsh/sessions/*/session.v4.jsonl.zstd`，119 次调用）验证过结构。
+
+| 项 | 落点 | 行为 |
+|---|---|---|
+| 提取 | `client.js` `toolActivitySummary()` | 只取**最后一条回答所在的那一轮**；按工具分组 |
+| 文件类 | `FILE_TOOLS`（read / edit / write / …） | 按路径去重后全列；绝对路径收成末两段（`…/overlay/overlay_darwin.m`），与对话里的写法对齐 |
+| 命令类 | bash / shell | 只保留最近 4 条，更早的折成 `N earlier calls` |
+| 失败 | `tool/result` 的 `error` 或 `message.isError` | 行尾标 `[failed]` |
+| 预算 | `MAX_TOOL_ACTIVITY_CHARS = 1200` | 按**行边界**截断，末尾加 `- …`，不留半条命令 |
+| 传输 | 请求体新增 `toolActivity` 字段 | 仅 `maxMode && includeToolActivity` 时客户端才发送 |
+| 接收 | `index.js` `normalizeInput()` | 同样仅在开关打开时读取，并再截到 4000 字符 |
+| 提示词 | `index.js` `buildUserContent(messages, toolActivity)` | 作为「回答那一轮的工具调用」段落放在 transcript 之前，同样标注为不可信数据 |
+
+**真实会话实测输出**（119 次工具调用的那轮）：
+
+```
+- bash: 30 earlier calls
+- bash: grep -a -c "勾选后要点「保存」才生效" native/build/bin/AtHand.app/...
+- bash: python3 - <<'PY' from pathlib import Path ...
+- job_kill
+- edit …/overlay/overlay_darwin.m
+- edit …/frontend/index.html
+- job_output
+```
+
+第一版是逐条罗列命令，结果 bash 把文件编辑挤出了 1200 字符预算——而「下一步」通常恰恰指向前面的文件。改成按工具分组后才对。
 
 ## 5. 参考
 
