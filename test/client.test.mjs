@@ -30,7 +30,7 @@ function makeStorage() {
   };
 }
 
-function loadClient(storage) {
+function loadClient(storage, options = {}) {
   let bundle;
   const sandbox = {
     window: {
@@ -59,10 +59,13 @@ function loadClient(storage) {
       addEventListener() {},
       removeEventListener() {},
     },
+    queueMicrotask,
     console,
-    fetch: async () => {
-      throw new Error('not used');
-    },
+    fetch: options.fetch === undefined
+      ? async () => {
+        throw new Error('not used');
+      }
+      : options.fetch,
     AbortController,
   };
   sandbox.globalThis = sandbox;
@@ -88,8 +91,10 @@ function loadClient(storage) {
       return fn;
     },
   };
+  // Taken by reference on purpose: a caller may fill the object after loading.
+  const react = options.react === undefined ? fakeReact : options.react;
   return bundle.factory((name) => {
-    if (name === 'react') return fakeReact;
+    if (name === 'react') return react;
     throw new Error('unexpected module: ' + name);
   });
 }
@@ -383,4 +388,126 @@ test('the copy and the settings labels follow the DSH locale service', () => {
   service.active = 'en';
   revision += 1;
   assert.equal(section.options.label(), 'Next input');
+});
+/**
+ * A tiny React stand-in for a settings page: hook slots persist between
+ * renders, every state update re-renders the page, and an effect is allowed
+ * to be asynchronous (it runs after the render that scheduled it).
+ */
+const harnessApi = {
+  useSyncExternalStore: () => 0,
+  useCallback: (fn) => fn,
+  useMemo: (fn) => fn(),
+};
+
+function pageHarness(page) {
+  const hooks = { refs: [], states: [], effects: [] };
+  let cursor = 0;
+  let scheduled = false;
+  const api = harnessApi;
+  Object.assign(api, {
+    createElement(type, props, ...children) {
+      return { type, props: props === null || props === undefined ? {} : props, children: children.flat(Infinity) };
+    },
+    useRef(value) {
+      const index = cursor;
+      cursor += 1;
+      hooks.refs[index] = hooks.refs[index] === undefined ? { current: value } : hooks.refs[index];
+      return hooks.refs[index];
+    },
+    useState(initial) {
+      const index = cursor;
+      cursor += 1;
+      if (hooks.states[index] === undefined) hooks.states[index] = { value: initial };
+      return [hooks.states[index].value, (next) => {
+        hooks.states[index].value = typeof next === 'function' ? next(hooks.states[index].value) : next;
+        scheduled = true;
+      }];
+    },
+    useEffect(fn) {
+      hooks.effects.push(fn);
+    },
+    useLayoutEffect(fn) {
+      hooks.effects.push(fn);
+    },
+    useSyncExternalStore: () => 0,
+    useCallback: (fn) => fn,
+    useMemo: (fn) => fn(),
+  });
+  const render = () => {
+    cursor = 0;
+    hooks.effects = [];
+    const tree = page({});
+    // Effects run after the render, like React: the fetch settles later and
+    // flips `loading`, which schedules another render.
+    for (const effect of hooks.effects) effect();
+    return tree;
+  };
+  const settle = async () => {
+    for (let turn = 0; turn < 8; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (!scheduled) continue;
+      scheduled = false;
+      render();
+    }
+  };
+  return { api, render, settle };
+}
+
+function labelsOf(tree) {
+  const found = [];
+  const walk = (node) => {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (node === null || typeof node !== 'object') return;
+    if (node.props !== undefined && typeof node.props['aria-label'] === 'string') found.push(node.props);
+    walk(node.children);
+  };
+  walk(tree);
+  return new Map(found.map((props) => [props['aria-label'], props]));
+}
+
+test('renders the Max mode section with its sub-switches locked while off', async () => {
+  const settings = {
+    values: {
+      maxSuggestionChars: 140, maxContextChars: 8000, maxMessages: 24, maxTokens: 512, timeoutMs: 20000,
+      enterToSend: true, predictOnActivate: true, predictionProvider: '', predictionModel: '',
+      maxMode: false, includeToolActivity: true, smartPack: true, allowMultiline: true,
+      reasoningEffort: 'model', retryOnFailure: true, predictOnEndOnly: true, promptVariant: 'next',
+    },
+    providers: [],
+  };
+  // The harness object is created before the bundle loads: the module binds
+  // `React.createElement` at load time, so the methods must already be there.
+  const react = harnessApi;
+  const client = loadClient(makeStorage(), {
+    react,
+    fetch: async () => ({ ok: true, json: async () => settings }),
+  });
+  const registrations = [];
+  const ctx = {
+    locale: { register: () => () => {}, bind: () => (key) => key, getSnapshot: () => ({ active: 'en', revision: 0 }), subscribe: () => () => {} },
+    get() { return undefined; },
+    effect(fn) { fn(); },
+    slots: { inject(_k, cb) { cb(); }, register(o, c) { registrations.push({ options: o, component: c }); } },
+  };
+  client.apply(ctx);
+  const page = registrations.find((entry) => entry.options.name === 'settings.section').component;
+  const harness = pageHarness(page);
+
+  harness.render();
+  await harness.settle();
+  const tree = harness.render();
+  const controls = labelsOf(tree);
+
+  // `t()` resolves through the locale service, so labels are the English copy.
+  assert.ok(controls.has('Enable Max mode'), 'the master switch renders');
+  assert.equal(controls.get('Enable Max mode').disabled, false, 'the master switch is always editable');
+  for (const label of ['Include tool activity', 'Improved context packing', 'Allow multiline suggestions',
+    'Reasoning effort', 'Retry on failure', 'Only predict after an answer', 'Prediction prompt']) {
+    assert.ok(controls.has(label), label + ' renders');
+    assert.equal(controls.get(label).disabled, true, label + ' is locked while Max mode is off');
+  }
 });

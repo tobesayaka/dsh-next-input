@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { after } from 'node:test';
 
 import { apply } from '../src/index.js';
@@ -20,6 +20,14 @@ function requestFor(body) {
 
 function install(stream, config) {
   rmSync(join(testHome, 'next-input'), { recursive: true, force: true });
+  return harness(stream, config);
+}
+
+/**
+ * Register the Host routes on a fresh ctx without clearing the settings
+ * directory, so a test can present a settings file that already exists.
+ */
+function harness(stream, config) {
   let route;
   const routes = new Map();
   const calls = [];
@@ -461,6 +469,73 @@ test('rejects invalid settings without touching the file', async () => {
   assert.equal(unknown.status, 400);
   assert.deepEqual(await unknown.json(), { error: 'unknown_setting', field: 'nope' });
   assert.throws(() => readFileSync(initial.path, 'utf8'));
+});
+
+test('loads a settings file written before Max mode existed', async () => {
+  // install() clears the settings directory before apply() reads it, so this
+  // test builds its own harness without the cleanup: that is exactly the
+  // upgrade case, a 0.5.x file already on disk when the Host starts.
+  const file = join(testHome, 'next-input', 'settings.json');
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ maxTokens: 300, enterToSend: false }, null, 2));
+  const { routes } = harness(goodStream);
+  const settings = routes.get('/api/next-input.settings');
+  const loaded = await (await settings.fetch(settingsRequest('GET'))).json();
+  assert.equal(loaded.values.maxTokens, 300);
+  assert.equal(loaded.values.enterToSend, false);
+  assert.equal(loaded.values.maxMode, false);
+  assert.equal(loaded.values.smartPack, true);
+  assert.equal(loaded.values.includeToolActivity, true);
+  assert.equal(loaded.values.reasoningEffort, 'model');
+  // Reading it never rewrites the file.
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).maxMode, undefined);
+});
+
+test('round-trips the Max mode settings without changing a prediction', async () => {
+  const { route, routes, calls } = install(goodStream);
+  const settings = routes.get('/api/next-input.settings');
+  const initial = await (await settings.fetch(settingsRequest('GET'))).json();
+  // Max mode ships off, and its sub-switches have defaults even when off.
+  assert.equal(initial.values.maxMode, false);
+  assert.equal(initial.values.reasoningEffort, 'model');
+  assert.equal(initial.values.promptVariant, 'next');
+
+  const saved = await settings.fetch(settingsRequest('POST', {
+    values: {
+      maxMode: true,
+      includeToolActivity: false,
+      smartPack: false,
+      allowMultiline: false,
+      reasoningEffort: 'high',
+      retryOnFailure: false,
+      predictOnEndOnly: false,
+      promptVariant: 'legacy',
+    },
+  }));
+  assert.equal(saved.status, 200);
+  const body = await saved.json();
+  assert.equal(body.values.maxMode, true);
+  assert.equal(body.values.reasoningEffort, 'high');
+  assert.equal(body.values.promptVariant, 'legacy');
+  assert.equal(body.values.includeToolActivity, false);
+
+  const afterSave = await (await settings.fetch(settingsRequest('GET'))).json();
+  assert.equal(afterSave.values.maxMode, true);
+
+  // The skeleton only stores the switches: a prediction keeps the 0.5.x
+  // request even with Max mode on and every sub-switch flipped.
+  const response = await route.fetch(requestFor(conversation));
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].reasoningEffort, 'low');
+  assert.equal(calls[0].maxTokens, 512);
+  assert.match(calls[0].options.messages[0].content[0].text, /Predict the user's next message now\./);
+  assert.doesNotMatch(calls[0].options.messages[0].content[0].text, /tool_activity/u);
+
+  for (const value of ['fast', 'MAX', '']) {
+    const rejected = await settings.fetch(settingsRequest('POST', { values: { reasoningEffort: value } }));
+    assert.equal(rejected.status, 400, 'reasoningEffort ' + JSON.stringify(value) + ' is not a mode');
+  }
 });
 
 async function* meteredStream() {
