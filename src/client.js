@@ -2000,16 +2000,20 @@ window.__ModuleLoader__.load({
 
         // Every sub-switch below is implemented and read by the Host; the
         // master switch only gates them, so while it is off each one stores the
-        // choice without changing a prediction.
-        const budgetRow = (labelKey, key) => inputRow(
-          t(labelKey),
-          '',
-          key,
-          true,
-          undefined,
-          SUB_ROW,
-          form.maxMode !== true,
-        );
+        // choice without changing a prediction. Each budget also shows the
+        // range the Host accepts, which a number input cannot display on its own.
+        const budgetRow = (labelKey, key) => {
+          const [min, max] = SETTINGS_LIMITS[key];
+          return inputRow(
+            t(labelKey),
+            t('maxModeRangeHint') + ' ' + min + '–' + max,
+            key,
+            true,
+            undefined,
+            SUB_ROW,
+            form.maxMode !== true,
+          );
+        };
 
         const maxModeSection = () => section(t('sectionMax'), [
           switchRow(t('maxModeLabel'), t('maxModeHint'), form.maxMode, (value) => update('maxMode', value)),
@@ -2178,6 +2182,7 @@ window.__ModuleLoader__.load({
         maxModeLabel: '启用 Max 模式',
         maxModeHint: '对标 Codex 预测的改进，按下面的子项生效。关闭时完全使用当前逻辑，行为不变。',
         maxModeBudgets: '以下四项只在 Max 模式开启时生效；关闭时固定使用 8000 字符 / 24 条 / 512 token / 140 字符。',
+        maxModeRangeHint: '可调范围',
         maxModeInert: '这些子项决定预测如何构建；总开关关闭时只保存选择，不生效。',
         includeToolActivityLabel: '带上工具活动',
         includeToolActivityHint: '把这一轮跑过的命令、读写的文件和执行的测试一并送入预测。',
@@ -2255,6 +2260,7 @@ window.__ModuleLoader__.load({
         maxModeLabel: 'Enable Max mode',
         maxModeHint: 'The improvements modelled on Codex predictions, each gated below. While off, predictions use the current logic and behaviour does not change.',
         maxModeBudgets: 'These four apply only while Max mode is on; with it off the prediction uses a fixed 8000 characters / 24 messages / 512 tokens / 140 characters.',
+        maxModeRangeHint: 'Range',
         maxModeInert: 'These switches decide how a prediction is built; while the master switch is off they only store the choice.',
         includeToolActivityLabel: 'Include tool activity',
         includeToolActivityHint: 'Send the commands, files and tests this turn touched along with the prediction request.',
