@@ -923,7 +923,10 @@ window.__ModuleLoader__.load({
             width: box.width,
             maxWidth: box.width,
             display: 'flex',
-            alignItems: 'center',
+            // A prediction longer than one line wraps inside the composer
+            // width, like typed text; the first line keeps `box.top`.
+            flexWrap: 'wrap',
+            alignItems: 'flex-start',
             gap: 6,
             direction: box.direction,
             textAlign: box.direction === 'rtl' ? 'right' : 'left',
@@ -933,7 +936,6 @@ window.__ModuleLoader__.load({
             letterSpacing: box.letterSpacing,
             color: 'var(--dsw-alias-label-secondary)',
             opacity: 0.8,
-            whiteSpace: 'nowrap',
             overflow: 'hidden',
             pointerEvents: 'none',
             zIndex: 5,
@@ -943,9 +945,8 @@ window.__ModuleLoader__.load({
           key: 'text',
           style: {
             minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
+            overflowWrap: 'anywhere',
+            whiteSpace: 'pre-wrap',
           },
         }, suggestion.text),
         h('kbd', {

@@ -15,6 +15,8 @@ in the empty composer, and lets the user accept it with **Tab**.
 - Caches predictions on the Host by `sessionId + answerKey`, so switching
   Sessions, remounting the composer, or reloading the page restores the ghost.
 - Shows the prediction only while the composer is empty and the Session is idle.
+- Wraps a prediction longer than one line inside the composer width, like typed
+  text, instead of truncating it.
 - `Tab` accepts the prediction; by default plain `Enter` accepts **and sends**
   it.
 - Follows the DSH interface language: the ghost hint, the announcements, and
