@@ -158,17 +158,29 @@ change helped.
 | Reasoning effort | `reasoningEffort` | `model` stops pinning the lowest advertised effort and lets the provider decide. `low` / `medium` / `high` pin a level, and are sent only when the model advertises it. |
 | Retry on failure | `retryOnFailure` | Retries once after a 250 ms backoff. The retry shares the same wall-clock bound, so `timeoutMs` still caps the whole prediction. |
 | Only predict after an answer | `predictOnEndOnly` | Ignores `predictOnActivate`, so opening a Session does not spend an extra model call. |
-| Prediction prompt | `promptVariant` | `next` asks for specifics from this turn (file, function, command, error) and lets the length follow the user's own messages. `legacy` keeps the original prompt. |
+| Prediction prompt | `promptVariant` | `next` works out the situation first (asking a question, waiting for a confirmation, reporting a finished or failed result), then names the next action. When the next message carries more than one point, it uses a numbered list, a bulleted list, or a fenced block instead of one run-on sentence. `legacy` keeps the original prompt. |
+
+**Context and output budgets.** Max mode also widens two budgets, using the
+same rule as `maxSuggestionChars`: the Max mode value applies **only while the
+setting is still at its default**, and any explicit value wins.
+
+| Setting | Default | Max mode | Why |
+|---|---|---|---|
+| Max context characters `maxContextChars` | 8000 | 32000 | 8000 characters only fit two or three long answers, so the model cannot see how this user writes. Codex inherits the whole thread; a wider character budget closes part of that gap. |
+| Max messages `maxMessages` | 24 | 64 | Same reason; in a long Session the 24-message cap runs out before the character budget does. |
+| Max output tokens `maxTokens` | 512 | 1024 | A structured prediction plus a reasoning model's hidden tokens does not fit in 512. The 20 s timeout still applies. |
 
 **Packing happens in the browser.** The client reads these values once, when the
 composer overlay mounts, and caches them. So:
 
 - The prompt, reasoning-effort, retry, multiline, and tool-activity changes
   apply to the next prediction immediately after **Save**.
-- Changing `smartPack` or `includeToolActivity` needs a **page refresh** before
-  it affects what the client sends.
+- Changing `smartPack`, `includeToolActivity`, or either context budget needs a
+  **page refresh** before it affects what the client sends.
 - If that one read fails, every prediction falls back to the pre-Max behaviour
   rather than breaking.
+- With Max mode off the client still packs a fixed 7000 characters / 24
+  messages (the 0.5.x behaviour) and ignores those two settings.
 
 A multiline suggestion is a passing shape, not a failure: when the next step
 naturally needs structure (a pasted error, several conditions, a list), it

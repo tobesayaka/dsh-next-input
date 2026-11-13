@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Max mode widens the context and output budgets.** Same rule as `maxSuggestionChars`: the Max mode value applies only while the setting is still at its default, and an explicit value wins. `maxContextChars` 8000 → 32000, `maxMessages` 24 → 64, `maxTokens` 512 → 1024. This closes the largest remaining gap to Codex's "inherit the whole thread" (Codex itself does not emit a structured prediction format; see `design/max-mode.md` §4.4).
+- **The client now reads `maxContextChars` / `maxMessages` in Max mode.** The browser half used to pack a fixed 7000 characters / 24 messages (`MAX_CONTEXT_CHARS`), so raising the limits on the Settings page had no effect. **With Max mode off it still packs 7000 / 24**, so the 0.5.x path is unchanged.
+- **The Max mode prompt asks for structure.** It works out the situation first (asking a question, waiting for a confirmation, reporting a finished or failed result) and, when the next message carries more than one point, asks for a numbered list, a bulleted list, or a fenced block instead of one run-on sentence. A single-point message stays one line; structure must not be invented.
+
 ## 0.5.2
 
 - The client half reads the locale service from the injected context

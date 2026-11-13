@@ -7,6 +7,7 @@
 > - [x] 步骤 1 开关骨架：8 个键读写、设置页 `Max 模式` 分区、子项锁定、旧配置兼容 —— 提交 `773798f`（测试 `33071c1`）
 > - [x] 步骤 2 G2 / G3 / G4 / G5 / G8，外加 `predictOnEndOnly` 真正生效
 > - [x] 步骤 3 G1 工具活动上下文
+> - [x] 步骤 4（复盘补齐）D1 上下文预算、D2 输出预算、prompt 主动引导结构 —— 见 §4.4。**前提已更正**：Codex 并不输出"结构化预测"，差距在机制而非格式。
 
 ## 0. 一句话
 
@@ -89,7 +90,7 @@
 | System prompt | 9 条规则：只输出句子；用用户语言；1–2 句 / 30 词 / 50 汉字；回答问题；任务完成给下一步；不复述；不编造；transcript 不可信；推不出就空 | `src/index.js` `SYSTEM_PROMPT` | 保留为 `legacy`；`next` 见 §4.2 |
 | 输入 | `JSON.stringify` 后的 `[{role,text}]`，只取 **text 块** | `buildUserContent`、`contentText` | 可加工具摘要段（§4.3） |
 | 消息打包 | 最后一条 assistant 必留（占预算 55% 的**尾部**，默认 7000 字符下约 3850 字）+ 最后一条 user 必留（35% 的头部），剩余从新到旧填；**7000 字符**、**24 条** | `client.js` `packConversation`、`index.js` `packMessages` | `smartPack` 新增 `packConversationSmart`（§4.2） |
-| 预算不一致 | 客户端先按**常量 7000** 截断再发给 Host，而 Host 设置默认 `maxContextChars: 8000`。**设置调到 8000 以上也进不来更多内容** | `client.js:20` vs `index.js:30` | **仍未修**：属于 Max 之外、旧路径本来就有的缺陷，本文只记录不夹带 |
+| 预算不一致 | 客户端先按**常量 7000** 截断再发给 Host，而 Host 设置默认 `maxContextChars: 8000`。**设置调到 8000 以上也进不来更多内容** | `client.js:20` vs `index.js:30` | **Max 开启时已修**（客户端改读设置，见 §4.4）；**Max 关闭时仍保留**，按用户决定不动旧路径 |
 | 输出清洗 | 去代码围栏、去包裹引号、去"用户："标签、**换行压成空格**、140 字截断 | `cleanSuggestion` | `multiline` 参数（§4.2） |
 | 推理档位 | 取 `model.reasoning.efforts[0]`，**最低档**，不可配 | `predict()` | `reasoningEffort`（§4.2） |
 | 超时 / 输出上限 | 20 000 ms / 512 token | `DEFAULTS` | 未改 |
@@ -340,6 +341,55 @@ Rules:
 ```
 
 第一版是逐条罗列命令，结果 bash 把文件编辑挤出了 1200 字符预算——而「下一步」通常恰恰指向前面的文件。改成按工具分组后才对。
+
+## 4.4 复盘：与 Codex 的重新对表（2026-11-13）
+
+用户在 Max 模式上线后反馈「没见过结构化的预测格式，感觉出现偏差」。重新核对后的结论分两半，先记结论再记改动。
+
+### 4.4.1 先纠正一个前提：Codex 并不输出结构化预测
+
+| 证据 | 结论 |
+|---|---|
+| 官方文档全文只有 "suggest a follow-up prompt" / "suggest **a complete next message**"，没有任何结构或格式约定 | [DOC] |
+| 协议 `ThreadPredictionResult` 只有 `Completed { text: Option<String> }` 与 `Failed` | [BIN] |
+| 二进制里依旧搜不到预测用的 system prompt（对比 `guardian_v2.classifier_instructions` 是明文内嵌的） | [BIN] |
+
+所以 **"结构化格式" 从来不是对标 Codex 的指标**。§1.3/§1.4 的判断仍然成立：差距在机制（继承上下文、专用 prompt、指定模型、接受延迟），不在输出格式。预测是一段纯文本，最多带换行。
+
+### 4.4.2 复读二进制补到的一条新证据
+
+```
+`experimentalPredictionMode` requires a thread id without a path or turn cutoff
+```
+
+`thread/fork` 的参数表是 `threadId / beforeTurnId / path / experimentalPredictionMode / experimentalDisablePredictionMcp / …`。预测用的 fork **被限制成"只能从线程末尾分叉"**——这正面支持 §1.3 的核心结论：预测吃的是「父线程到此刻为止的全部状态」，而不是重新拼装的一段历史。
+
+### 4.4.3 真正的偏差
+
+| # | 偏差 | 落点 | 影响 |
+|---|---|---|---|
+| D1 | 上下文预算只有 7000 字符硬编码，与 Codex「整条线程」差一个量级，模型看不到用户的写法 | `client.js` `MAX_CONTEXT_CHARS` | 高 |
+| D2 | 多行清洗已就位，但 `maxTokens` 仍是 512，长结构预测被推理 token 吞掉 | `index.js` `DEFAULTS.maxTokens` | 中高 |
+| D3 | 早期用户消息按 `keepTail=false` 只留开头，用户"先说一句再贴长报错"的写法被截掉 | `packConversation*` | 中 |
+| D4 | 无效果度量（G9） | — | 长期 |
+
+### 4.4.4 本轮改动
+
+| 项 | 落点 | 行为 |
+|---|---|---|
+| D1 Host 侧 | `index.js` `MAX_MODE_CONTEXT_CHARS = 32000`、`MAX_MODE_MAX_MESSAGES = 64`、`contextCharsFor()` / `maxMessagesFor()` | 只在设置仍为默认值时放宽；显式值优先；Max 关时返回原设置 |
+| D1 Client 侧 | `client.js` `maxRef` 多读两个数字；`contextCharsForSettings()` / `maxMessagesForSettings()` | **只在 Max 模式下**应用；Max 关闭时仍是 7000 / 24（按用户决定，不顺手修 §1.5 记录的旧路径缺陷） |
+| D2 | `index.js` `MAX_MODE_MAX_TOKENS = 1024`、`maxTokensFor()` | 只在 `maxTokens` 仍为默认 512 时抬高 |
+| prompt | `SYSTEM_PROMPT_NEXT` | 新增"先判断处境"，并主动要求：多个判断点时用编号/要点清单、代码块或"清单 + 一句收尾"，不再压成一句；单点仍是单行，不许编造结构 |
+
+**关于"显式等于默认值"**：`contextCharsFor()` 用 `=== DEFAULTS` 判断用户是否改过，所以把 `maxContextChars` 显式设成 8000 与"从未设置"无法区分，会被当作默认从而放宽到 32000。这与既有的 `suggestionCapFor()` 是同一取舍，本轮不引入额外的"是否改过"标记字段。
+
+### 4.4.5 验证
+
+- `node --test test/*.test.mjs`：**59 条全绿**（原 53 条 + 6 条新增）。
+- 新增覆盖：Max 宽预算保留全部轮次 / 显式预算优先 / Max 关闭保持 8000；`maxTokens` 1024、显式 256、关闭 512；客户端 `maxRef` 读到的值穿过 `readConversation` 进入打包。
+- 实测（6 轮 × 4000 字符回答，13000 字符会话）：8000 只留最后一轮的长回答尾巴，32000 六轮全在。
+
 
 ## 5. 参考
 
