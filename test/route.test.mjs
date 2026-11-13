@@ -215,6 +215,59 @@ test('keeps the user request when the final answer fills the budget', async () =
   assert.ok(text.length < 400, String(text.length));
 });
 
+// A long conversation with six rounds: without a wide budget the opening
+// request is the first thing dropped, which is what Max mode has to avoid.
+function longConversation() {
+  const messages = [];
+  for (let round = 0; round < 6; round += 1) {
+    messages.push({ role: 'user', text: `round ${round}: goal marker ${round} ` + 'q'.repeat(40) });
+    messages.push({ role: 'assistant', text: `answer ${round}: ` + 'a'.repeat(4000) });
+  }
+  return { ...conversation, messages };
+}
+
+test('Max mode widens the context budget and keeps the opening request', async () => {
+  const { route, calls } = install(goodStream, { maxMode: true });
+  assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
+  const text = calls[0].options.messages[0].content[0].text;
+  // Every round is 76 + 4008 characters, so 32000 characters keep all six.
+  // The 0.5.x 8000-character budget drops the opening rounds.
+  assert.match(text, /goal marker 0/);
+  assert.match(text, /goal marker 3/);
+});
+
+test('Max mode leaves an explicit context budget alone', async () => {
+  // 7000 rather than 8000: the Max mode defaults only apply while the setting
+  // still equals its default, so an explicit value that differs must win.
+  const { route, calls } = install(goodStream, { maxMode: true, maxContextChars: 7000 });
+  assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
+  const text = calls[0].options.messages[0].content[0].text;
+  assert.doesNotMatch(text, /goal marker 0/);
+  assert.doesNotMatch(text, /goal marker 3/);
+});
+
+test('turning Max mode off keeps the default context budget', async () => {
+  const { route, calls } = install(goodStream);
+  assert.equal((await route.fetch(requestFor(longConversation()))).status, 200);
+  const text = calls[0].options.messages[0].content[0].text;
+  assert.doesNotMatch(text, /goal marker 0/);
+  assert.doesNotMatch(text, /goal marker 3/);
+});
+
+test('Max mode raises the output budget only while it is still default', async () => {
+  const raised = install(goodStream, { maxMode: true });
+  assert.equal((await raised.route.fetch(requestFor(conversation))).status, 200);
+  assert.equal(raised.calls[0].maxTokens, 1024);
+
+  const explicit = install(goodStream, { maxMode: true, maxTokens: 256 });
+  assert.equal((await explicit.route.fetch(requestFor(conversation))).status, 200);
+  assert.equal(explicit.calls[0].maxTokens, 256);
+
+  const off = install(goodStream);
+  assert.equal((await off.route.fetch(requestFor(conversation))).status, 200);
+  assert.equal(off.calls[0].maxTokens, 512);
+});
+
 test('reports a max-token cut instead of silently returning nothing', async () => {
   async function* cutStream() {
     yield { type: 'text-delta', index: 0, text: 'partial' };
@@ -535,12 +588,13 @@ test('round-trips the Max mode settings and applies them to a prediction', async
   assert.equal(afterSave.values.maxMode, true);
 
   // With Max mode on, the pinned effort is requested and the legacy prompt
-  // still wins because `promptVariant` names it.
+  // still wins because `promptVariant` names it. The budgets follow the Max
+  // mode defaults because neither was touched here.
   const response = await route.fetch(requestFor(conversation));
   assert.equal(response.status, 200);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].reasoningEffort, 'low');
-  assert.equal(calls[0].maxTokens, 512);
+  assert.equal(calls[0].maxTokens, 1024);
   assert.match(calls[0].options.messages[0].content[0].text, /Predict the user's next message now\./);
   assert.doesNotMatch(calls[0].options.messages[0].content[0].text, /tool_activity/u);
   assert.match(calls[0].options.system, /Keep it short: one or two sentences/u);
@@ -558,7 +612,11 @@ test('Max mode sends the next prompt and stops pinning the lowest effort', async
   assert.equal(calls.length, 1);
   // 'model' means "let the provider decide", so no effort is requested.
   assert.equal(calls[0].reasoningEffort, undefined);
-  assert.match(calls[0].options.system, /Match the length of the user's own messages/u);
+  // The prompt states the situation first and asks for structure when the next
+  // message carries more than one point, instead of capping the reply's length.
+  assert.match(calls[0].options.system, /Work out the situation first/u);
+  assert.match(calls[0].options.system, /numbered or bulleted list/u);
+  assert.match(calls[0].options.system, /Do not manufacture structure for a one-word answer/u);
   assert.doesNotMatch(calls[0].options.system, /Keep it short: one or two sentences/u);
 });
 

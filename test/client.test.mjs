@@ -563,6 +563,49 @@ test('smart packing obeys the message cap', () => {
   assert.ok(smart.length <= 5);
 });
 
+test('Max mode reads the budgets from the settings page', () => {
+  const client = loadClient(makeStorage());
+  const { contextCharsForSettings, maxMessagesForSettings } = client.__test;
+  // Untouched defaults: Max mode uses its own wider budgets.
+  assert.equal(contextCharsForSettings({ maxContextChars: 8000 }), 32000);
+  assert.equal(maxMessagesForSettings({ maxMessages: 24 }), 64);
+  // A value the user changed always wins.
+  assert.equal(contextCharsForSettings({ maxContextChars: 12000 }), 12000);
+  assert.equal(maxMessagesForSettings({ maxMessages: 10 }), 10);
+  // A failed settings read leaves the key missing: treat it as the default.
+  assert.equal(contextCharsForSettings({}), 32000);
+  assert.equal(maxMessagesForSettings({}), 64);
+});
+
+test('readConversation passes the Max mode budgets to the packing', () => {
+  const client = loadClient(makeStorage());
+  const entries = longConversation(6).map((message, index) => ({
+    type: 'event',
+    event: message.role === 'user'
+      ? { type: 'user/message', seq: index, surfaceOp: 'append', data: { source: { kind: 'user' }, content: [{ type: 'text', text: message.text }] } }
+      : {
+        type: 'assistant/message',
+        seq: index,
+        surfaceOp: 'append',
+        data: { message: { source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: message.text }] } },
+      },
+  }));
+  const sessions = {
+    binding() {
+      return { eventSource: { getSnapshot() { return { entries }; } } };
+    },
+  };
+
+  // Max mode off: the 0.5.x constants stay, and the opening round is dropped.
+  const off = client.__test.readConversation(sessions, 'session-1');
+  assert.ok(!off.messages.some((message) => message.text.startsWith('第0轮')));
+  assert.ok(off.messages.reduce((total, message) => total + message.text.length, 0) <= 7000);
+
+  // Max mode on with untouched budgets: the wider budget keeps every round.
+  const on = client.__test.readConversation(sessions, 'session-1', { maxMode: true, smartPack: true });
+  assert.ok(on.messages.some((message) => message.text.startsWith('第0轮')));
+});
+
 // ---------------------------------------------------------------------------
 // Tool activity summary (Max mode `includeToolActivity`). The helpers are
 // module-private, so they come out of the bundle through the same test hook
