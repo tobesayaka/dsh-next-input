@@ -353,6 +353,7 @@ window.__ModuleLoader__.load({
 
       const [suggestion, setSuggestion] = React.useState(null);
       const [box, setBox] = React.useState(null);
+      const [reserve, setReserve] = React.useState(0);
       const [fallbackReady, setFallbackReady] = React.useState(false);
       const [restoreTick, setRestoreTick] = React.useState(0);
 
@@ -749,6 +750,7 @@ window.__ModuleLoader__.load({
       React.useLayoutEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId || draft !== '' || phase !== 'plain') {
           setBox(null);
+          setReserve(0);
           return undefined;
         }
 
@@ -899,6 +901,75 @@ window.__ModuleLoader__.load({
         return () => card.removeAttribute(GHOST_ATTR);
       }, [suggestion, box, draft, phase, sessionId]);
 
+      // A wrapped prediction must not cover the tool row: let the composer grow
+      // under it like it grows under a typed draft. Only the rows below the
+      // ghost's measured top are reserved — the editor's first line is already
+      // in the empty composer, and the rows above it (inside the card's top
+      // pad) would otherwise push the ghost out of its own line.
+      React.useLayoutEffect(() => {
+        if (suggestion === null || suggestion.sessionId !== sessionId || box === null
+          || draft !== '' || phase !== 'plain') {
+          setReserve(0);
+          return undefined;
+        }
+        const root = rootRef.current;
+        const ghost = root === null ? null : root.querySelector('[data-dsh-next-input-ghost]');
+        const scroll = ghost === null ? null : ghost.closest('[data-input-scroll]');
+        const line = Number.parseFloat(box.lineHeight);
+        if (scroll === null || !Number.isFinite(line) || line <= 0) return undefined;
+
+        let connected = false;
+        let extra = 0;
+        let frame = 0;
+        let timer = 0;
+        const style = scroll.style;
+        const clear = () => {
+          if (!connected) return;
+          window.clearTimeout(timer);
+          if (extra > 0) style.removeProperty('min-height');
+          if (style.length === 0) scroll.removeAttribute('style');
+          connected = false;
+        };
+        const measure = () => {
+          frame = 0;
+          if (!scroll.isConnected) {
+            if (connected) clear();
+            return;
+          }
+          // A scrollport at its height cap must not inflate its own reservation.
+          const computed = window.getComputedStyle(scroll);
+          const room = Number.parseFloat(computed.maxHeight);
+          const inset = (Number.parseFloat(computed.paddingTop) || 0)
+            + (Number.parseFloat(computed.paddingBottom) || 0);
+          const capped = Number.isFinite(room) && scroll.getBoundingClientRect().height - inset >= room - 1;
+          const next = capped ? extra : Math.max(0, ghost.getBoundingClientRect().height - line);
+          if (next === extra) return;
+          clear();
+          extra = next;
+          if (extra === 0) {
+            setReserve(0);
+            return;
+          }
+          style.setProperty('min-height', 'calc(100% + ' + extra + 'px)');
+          connected = true;
+          setReserve(extra);
+        };
+        // The scrollport grows with the reservation, which may wrap the ghost
+        // differently (fonts, sidebar, zoom): keep re-measuring until it settles.
+        const schedule = () => {
+          if (frame !== 0) window.cancelAnimationFrame(frame);
+          frame = window.requestAnimationFrame(measure);
+        };
+        schedule();
+        timer = window.setInterval(schedule, 250);
+        return () => {
+          clear();
+          window.clearInterval(timer);
+          if (frame !== 0) window.cancelAnimationFrame(frame);
+          setReserve(0);
+        };
+      }, [suggestion, box, draft, phase, sessionId]);
+
       React.useEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId
           || box !== null || draft !== '' || phase !== 'plain') {
@@ -909,6 +980,23 @@ window.__ModuleLoader__.load({
         const timer = window.setTimeout(() => setFallbackReady(true), 600);
         return () => window.clearTimeout(timer);
       }, [suggestion, box, draft, phase, sessionId]);
+
+      // The ghost's own anchor sits in the card's flex flow with `inset: 0 0
+      // auto; height: 0`: raising only its min-height grows the card by that
+      // amount, and the card's layout hooks (auto-grow, observers) follow.
+      React.useLayoutEffect(() => {
+        const root = rootRef.current;
+        const slot = root === null ? null : root.closest('[data-composer-overlay]');
+        if (slot === null) return;
+        if (reserve > 0) {
+          slot.style.setProperty('min-height', reserve + 'px');
+          return;
+        }
+        if (slot.style.getPropertyValue('min-height') !== '') {
+          slot.style.removeProperty('min-height');
+          if (slot.style.length === 0) slot.removeAttribute('style');
+        }
+      }, [reserve, box, suggestion]);
 
       const ghost = suggestion !== null && suggestion.sessionId === sessionId
         && box !== null && draft === '' && phase === 'plain'
@@ -922,12 +1010,13 @@ window.__ModuleLoader__.load({
             top: box.top,
             width: box.width,
             maxWidth: box.width,
-            display: 'flex',
             // A prediction longer than one line wraps inside the composer
-            // width, like typed text; the first line keeps `box.top`.
-            flexWrap: 'wrap',
-            alignItems: 'flex-start',
-            gap: 6,
+            // width, like typed text; the first line keeps `box.top`, and the
+            // effect below reserves the wrapped height on the composer so the
+            // card grows and the tool row moves down instead of being covered.
+            // The key hints are inline after the text, so they follow its last
+            // line rather than starting a flex line of their own.
+            boxSizing: 'border-box',
             direction: box.direction,
             textAlign: box.direction === 'rtl' ? 'right' : 'left',
             fontFamily: box.fontFamily,
@@ -943,17 +1032,13 @@ window.__ModuleLoader__.load({
         },
         h('span', {
           key: 'text',
-          style: {
-            minWidth: 0,
-            overflowWrap: 'anywhere',
-            whiteSpace: 'pre-wrap',
-          },
+          style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
         }, suggestion.text),
         h('kbd', {
           key: 'tab',
           style: {
-            flex: 'none',
             display: 'inline-block',
+            marginLeft: 6,
             padding: '0 4px',
             border: '0.5px solid var(--dsw-alias-border-l1)',
             borderRadius: 4,
@@ -968,7 +1053,7 @@ window.__ModuleLoader__.load({
         suggestion.enterToSend === true ? h('span', {
           key: 'enter',
           style: {
-            flex: 'none',
+            marginLeft: 4,
             color: 'var(--dsw-alias-label-secondary)',
             fontSize: 10,
             lineHeight: '16px',
