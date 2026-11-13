@@ -23,38 +23,22 @@ import { dirname, join } from 'node:path';
  * (that is a dynamic-package sandbox concern); this half stays plain cordis.
  */
 
-/**
- * Cap for a multiline Max mode suggestion. Only used while `maxSuggestionChars`
- * is still at its default: an explicit value from the settings page wins.
- */
-const MAX_MODE_SUGGESTION_CHARS = 400;
-
-/**
- * Max mode context budget. Codex predicts from the parent thread's full
- * state; the 0.5.x 8000 characters only carry a couple of answers, which is
- * too little for the model to copy how this user writes. Like the suggestion
- * cap, these apply only while the matching setting is still at its default.
- */
-const MAX_MODE_CONTEXT_CHARS = 32000;
-const MAX_MODE_MAX_MESSAGES = 64;
-
-/**
- * Max mode output budget. A structured prediction (a short list, an answer
- * with its condition) plus a reasoning model's hidden tokens does not fit in
- * 512. Still bounded by the 20 s timeout, so this stays a middle value.
- */
-const MAX_MODE_MAX_TOKENS = 1024;
-
 const DEFAULTS = {
+  /**
+   * The five numeric budgets below live in the Max mode section of the
+   * settings page and are read only in Max mode. Their defaults are the Max
+   * mode values; with Max off the prediction uses the hardcoded 0.5.x values
+   * (`LEGACY_LIMITS`) instead and never looks at these.
+   */
   /** Longest suggestion the route returns. */
-  maxSuggestionChars: 140,
+  maxSuggestionChars: 400,
   /** Conversation characters kept for the prediction request. */
-  maxContextChars: 8000,
+  maxContextChars: 32000,
   /** Conversation messages kept for the prediction request. */
-  maxMessages: 24,
+  maxMessages: 64,
   /** Output cap for the auxiliary request. */
-  maxTokens: 512,
-  /** Wall-clock bound for one prediction. */
+  maxTokens: 1024,
+  /** Wall-clock bound for one prediction. Always used, Max mode or not. */
   timeoutMs: 20000,
   /** Let plain Enter accept the ghost and submit it immediately. */
   enterToSend: true,
@@ -85,6 +69,18 @@ const DEFAULTS = {
 };
 
 /** Allowed values for the enum settings; string settings are not ranges. */
+/**
+ * The 0.5.x budgets, used verbatim while Max mode is off. These are the
+ * hardcoded values the plugin shipped before Max mode existed; the settings
+ * page no longer exposes them outside Max mode, so nothing can change them.
+ */
+const LEGACY_LIMITS = {
+  maxSuggestionChars: 140,
+  maxContextChars: 8000,
+  maxMessages: 24,
+  maxTokens: 512,
+};
+
 const SETTINGS_ENUMS = {
   reasoningEffort: ['model', 'low', 'medium', 'high'],
   promptVariant: ['legacy', 'next'],
@@ -356,34 +352,21 @@ function usageReport(state) {
 }
 
 /**
- * The cap a prediction is cleaned with.
- *
- * Max mode allows multiline suggestions, which the 140-character single-line
- * cap would cut back to two or three lines. When the user has not changed
- * `maxSuggestionChars` from its default, Max mode uses its own larger default;
- * an explicit value always wins.
+ * The cap a prediction is cleaned with. Max mode reads the setting; with Max
+ * off the prediction keeps the hardcoded 0.5.x cap.
  * @param {Record<string, any>} options
  */
 function suggestionCapFor(options) {
-  if (options.maxMode === true && options.maxSuggestionChars === DEFAULTS.maxSuggestionChars) {
-    return MAX_MODE_SUGGESTION_CHARS;
-  }
-  return options.maxSuggestionChars;
+  return options.maxMode === true ? options.maxSuggestionChars : LEGACY_LIMITS.maxSuggestionChars;
 }
 
 /**
- * The conversation budget the Host packs for.
- *
- * Same rule as `suggestionCapFor`: Max mode widens the budget only while the
- * user has not touched the setting; an explicit value always wins. With Max
- * off this returns the plain setting, so the 0.5.x path is unchanged.
+ * The conversation budget the Host packs for. Read from the settings only in
+ * Max mode; otherwise the hardcoded 0.5.x budget applies.
  * @param {Record<string, any>} options
  */
 function contextCharsFor(options) {
-  if (options.maxMode === true && options.maxContextChars === DEFAULTS.maxContextChars) {
-    return MAX_MODE_CONTEXT_CHARS;
-  }
-  return options.maxContextChars;
+  return options.maxMode === true ? options.maxContextChars : LEGACY_LIMITS.maxContextChars;
 }
 
 /**
@@ -391,24 +374,15 @@ function contextCharsFor(options) {
  * @param {Record<string, any>} options
  */
 function maxMessagesFor(options) {
-  if (options.maxMode === true && options.maxMessages === DEFAULTS.maxMessages) {
-    return MAX_MODE_MAX_MESSAGES;
-  }
-  return options.maxMessages;
+  return options.maxMode === true ? options.maxMessages : LEGACY_LIMITS.maxMessages;
 }
 
 /**
  * The output cap a prediction asks for.
- *
- * Max mode raises the 512 default because a structured prediction plus hidden
- * reasoning does not fit; an explicit value always wins.
  * @param {Record<string, any>} options
  */
 function maxTokensFor(options) {
-  if (options.maxMode === true && options.maxTokens === DEFAULTS.maxTokens) {
-    return MAX_MODE_MAX_TOKENS;
-  }
-  return options.maxTokens;
+  return options.maxMode === true ? options.maxTokens : LEGACY_LIMITS.maxTokens;
 }
 
 const SYSTEM_PROMPT = `You are the next-message predictor inside a chat between a user and an AI coding assistant.

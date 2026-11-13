@@ -17,18 +17,13 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-next-input';
     const ROUTE = 'api/next-input.predict';
     const GHOST_ATTR = 'data-dsh-next-input-ghost-on';
-    const MAX_CONTEXT_CHARS = 7000;
-    const MAX_MESSAGES = 24;
+    // The 0.5.x packing budget, used verbatim while Max mode is off. The
+    // settings page no longer exposes it outside Max mode.
+    const LEGACY_CONTEXT_CHARS = 7000;
+    const LEGACY_MAX_MESSAGES = 24;
     // Tool activity is orientation, not a transcript: keep it small enough to
     // leave the conversation budget intact.
     const MAX_TOOL_ACTIVITY_CHARS = 1200;
-    // Max mode context budget. Mirrors the Host's `MAX_MODE_*` constants and
-    // `DEFAULTS`; only used while the user has not changed the setting, so an
-    // explicit value from the settings page always wins.
-    const MAX_MODE_CONTEXT_CHARS = 32000;
-    const MAX_MODE_MAX_MESSAGES = 64;
-    const DEFAULT_CONTEXT_CHARS = 8000;
-    const DEFAULT_MAX_MESSAGES = 24;
     const SETTLE_DELAY_MS = 50;
     const EMPTY = [];
 
@@ -352,26 +347,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Conversation characters Max mode packs with. Same rule as the Host's
-     * `contextCharsFor`: widen only while the setting is still at its default.
-     * A missing value means the settings read failed or predates the key, which
-     * is treated as the default.
+     * Conversation characters to pack with. Max mode reads the setting; with
+     * Max off the hardcoded 0.5.x budget applies.
      * @param {{ maxContextChars?: number }} maxSettings
+     * @param {boolean} max
      */
-    function contextCharsForSettings(maxSettings) {
-      const value = maxSettings.maxContextChars;
-      if (typeof value !== 'number' || value === DEFAULT_CONTEXT_CHARS) return MAX_MODE_CONTEXT_CHARS;
-      return value;
+    function contextCharsForSettings(maxSettings, max) {
+      const value = maxSettings === null || maxSettings === undefined ? undefined : maxSettings.maxContextChars;
+      return max && typeof value === 'number' ? value : LEGACY_CONTEXT_CHARS;
     }
 
     /**
-     * Message-count budget Max mode packs with.
+     * Message-count budget to pack with.
      * @param {{ maxMessages?: number }} maxSettings
+     * @param {boolean} max
      */
-    function maxMessagesForSettings(maxSettings) {
-      const value = maxSettings.maxMessages;
-      if (typeof value !== 'number' || value === DEFAULT_MAX_MESSAGES) return MAX_MODE_MAX_MESSAGES;
-      return value;
+    function maxMessagesForSettings(maxSettings, max) {
+      const value = maxSettings === null || maxSettings === undefined ? undefined : maxSettings.maxMessages;
+      return max && typeof value === 'number' ? value : LEGACY_MAX_MESSAGES;
     }
 
     /**
@@ -566,15 +559,12 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // The Max mode switches and the budgets they may widen. Only read in Max
-      // mode: with Max off, packing keeps the 0.5.x constants below.
+      // The Max mode switches and the budgets they own. The budgets are only
+      // read in Max mode; with Max off, packing keeps the hardcoded 0.5.x
+      // values and never looks at the settings.
       const max = maxSettings !== null && maxSettings !== undefined && maxSettings.maxMode === true;
-      const contextChars = max
-        ? contextCharsForSettings(maxSettings)
-        : MAX_CONTEXT_CHARS;
-      const maxMessages = max
-        ? maxMessagesForSettings(maxSettings)
-        : MAX_MESSAGES;
+      const contextChars = contextCharsForSettings(maxSettings, max);
+      const maxMessages = maxMessagesForSettings(maxSettings, max);
       const messages = max && maxSettings.smartPack === true
         ? packConversationSmart(all, contextChars, maxMessages)
         : packConversation(all, contextChars, maxMessages);
@@ -1934,7 +1924,7 @@ window.__ModuleLoader__.load({
           toggle(label, checked, onToggle, locked),
         );
 
-        const inputRow = (label, hint, key, numeric, width) => React.createElement('div', { style: ROW },
+        const inputRow = (label, hint, key, numeric, width, rowStyle, locked) => React.createElement('div', { style: rowStyle === undefined ? ROW : rowStyle },
           React.createElement('div', { style: STACK },
             React.createElement('div', { style: LABEL }, label),
             hint === '' ? null : React.createElement('div', { style: HINT }, hint),
@@ -1947,10 +1937,14 @@ window.__ModuleLoader__.load({
             step: numeric ? 1 : undefined,
             value: form[key],
             'aria-label': label,
-            disabled: saving,
+            disabled: saving || locked === true,
             spellCheck: false,
             onChange: (event) => update(key, event.target.value),
-            style: { ...INPUT, width: width === undefined ? 160 : width },
+            style: {
+              ...INPUT,
+              width: width === undefined ? 160 : width,
+              opacity: locked === true ? 0.6 : 1,
+            },
           }),
         );
 
@@ -2004,9 +1998,19 @@ window.__ModuleLoader__.load({
           form.maxMode !== true,
         );
 
-        // The skeleton is wired end to end, but every sub-switch still routes
-        // to the 0.5.x behaviour: the Host only reads them once a later step
-        // implements what each one turns on.
+        // Every sub-switch below is implemented and read by the Host; the
+        // master switch only gates them, so while it is off each one stores the
+        // choice without changing a prediction.
+        const budgetRow = (labelKey, key) => inputRow(
+          t(labelKey),
+          '',
+          key,
+          true,
+          undefined,
+          SUB_ROW,
+          form.maxMode !== true,
+        );
+
         const maxModeSection = () => section(t('sectionMax'), [
           switchRow(t('maxModeLabel'), t('maxModeHint'), form.maxMode, (value) => update('maxMode', value)),
           subSwitch('includeToolActivityLabel', 'includeToolActivityHint', 'includeToolActivity'),
@@ -2026,6 +2030,11 @@ window.__ModuleLoader__.load({
               legacy: t('variantLegacy'),
               next: t('variantNext'),
             }),
+          React.createElement('div', { style: HINT }, t('maxModeBudgets')),
+          budgetRow('maxTokensLabel', 'maxTokens'),
+          budgetRow('maxContextCharsLabel', 'maxContextChars'),
+          budgetRow('maxMessagesLabel', 'maxMessages'),
+          budgetRow('maxSuggestionCharsLabel', 'maxSuggestionChars'),
           React.createElement('div', { style: HINT }, t('maxModeInert')),
         ]);
 
@@ -2123,13 +2132,7 @@ window.__ModuleLoader__.load({
               form.predictionProvider === '' || models.length === 0,
               220,
             ),
-            inputRow(t('maxTokensLabel'), '', 'maxTokens', true),
             inputRow(t('timeoutLabel'), '', 'timeoutMs', true),
-          ]),
-          section(t('sectionContext'), [
-            inputRow(t('maxContextCharsLabel'), '', 'maxContextChars', true),
-            inputRow(t('maxMessagesLabel'), '', 'maxMessages', true),
-            inputRow(t('maxSuggestionCharsLabel'), '', 'maxSuggestionChars', true),
           ]),
           maxModeSection(),
           usageSection(),
@@ -2170,12 +2173,12 @@ window.__ModuleLoader__.load({
         settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
         sectionPrediction: '预测',
         sectionModel: '模型与延迟',
-        sectionContext: '上下文与输出',
         sectionUsage: '用量（本次 Host 运行）',
         sectionMax: 'Max 模式',
         maxModeLabel: '启用 Max 模式',
         maxModeHint: '对标 Codex 预测的改进，按下面的子项生效。关闭时完全使用当前逻辑，行为不变。',
-        maxModeInert: '子项目前只保存选择，所有预测仍走当前逻辑；每一项的对标实现会逐个接入。',
+        maxModeBudgets: '以下四项只在 Max 模式开启时生效；关闭时固定使用 8000 字符 / 24 条 / 512 token / 140 字符。',
+        maxModeInert: '这些子项决定预测如何构建；总开关关闭时只保存选择，不生效。',
         includeToolActivityLabel: '带上工具活动',
         includeToolActivityHint: '把这一轮跑过的命令、读写的文件和执行的测试一并送入预测。',
         smartPackLabel: '改进上下文打包',
@@ -2247,12 +2250,12 @@ window.__ModuleLoader__.load({
         settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
         sectionPrediction: 'Prediction',
         sectionModel: 'Model & latency',
-        sectionContext: 'Context & output',
         sectionUsage: 'Usage (this Host session)',
         sectionMax: 'Max mode',
         maxModeLabel: 'Enable Max mode',
         maxModeHint: 'The improvements modelled on Codex predictions, each gated below. While off, predictions use the current logic and behaviour does not change.',
-        maxModeInert: 'Sub-switches only store the choice for now; every prediction still uses the current logic until each one is implemented.',
+        maxModeBudgets: 'These four apply only while Max mode is on; with it off the prediction uses a fixed 8000 characters / 24 messages / 512 tokens / 140 characters.',
+        maxModeInert: 'These switches decide how a prediction is built; while the master switch is off they only store the choice.',
         includeToolActivityLabel: 'Include tool activity',
         includeToolActivityHint: 'Send the commands, files and tests this turn touched along with the prediction request.',
         smartPackLabel: 'Improved context packing',
