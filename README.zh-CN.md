@@ -103,7 +103,7 @@ bundle 没有额外依赖。安装后确认 `next-input` 这一行处于启用�
 
 **默认关闭。** 总开关关着时，下面所有键都不起作用，预测行为与引入 Max 模式之前完全一致：同样的提示词、同样的单行清洗、同样的上下文打包、同样的最低推理档位。
 
-在 **设置 → 下一步输入 → Max 模式** 打开。总开关控制这里的七个子开关和四个预算项：子开关可以各自关掉，方便判断到底是哪一项起了作用；预算项在总开关关闭时锁定、不可编辑。
+在 **设置 → 下一步输入 → Max 模式** 打开。总开关控制这里的七个子开关和四个预算项：子开关可以各自关掉，方便判断到底是哪一项起了作用；**总开关关闭时，下面这些子开关和预算项会全部收起**，页面上只留总开关——它们此时不生效，收起比摆一排灰掉的控件更清楚。收起期间已保存的选择仍然保留，重新打开即恢复。
 
 | 子开关 | 配置键 | 它改变什么 |
 |---|---|---|
@@ -167,8 +167,8 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 | `smartPack` | `true` | 打包时预留最早的提问。仅在 Max 模式下读取。 |
 | `allowMultiline` | `true` | 保留换行；`maxSuggestionChars` 为默认值时把上限提到 `400`。仅在 Max 模式下读取。 |
 | `reasoningEffort` | `'model'` | `model` / `low` / `medium` / `high`。仅在 Max 模式下读取。 |
-| `retryOnFailure` | `true` | 在 `timeoutMs` 内退避重试一次。仅在 Max 模式下读取。 |
-| `predictOnEndOnly` | `true` | 忽略 `predictOnActivate`。仅在 Max 模式下读取。 |
+| `retryOnFailure` | `false` | 在 `timeoutMs` 内退避重试一次。仅在 Max 模式下读取。 |
+| `predictOnEndOnly` | `false` | 忽略 `predictOnActivate`。仅在 Max 模式下读取。 |
 | `promptVariant` | `'next'` | `legacy` / `next`。仅在 Max 模式下读取。 |
 
 两个枚举键会校验：未知的 `reasoningEffort` 或 `promptVariant` 会被设置路由拒绝，来自 profile `config` 行时直接忽略，而不是悄悄选中一个并不存在的模式。
@@ -196,7 +196,7 @@ Host 缓存是进程内存，DSH/插件重启会清空。默认 `predictOnActiva
 - **Enter 只填入不发送**：当前 composer 没有暴露 submit action，或草稿在提交前被改动；Tab 仍可填入，可手动发送。
 - **设置页不出现**：安装/重载后刷新页面，再打开 设置 → 下一步输入。
 - **始终没有预测**：确认输入框为空、会话空闲，且 `llm.listProviders()` 仍包含所选路由。
-- **Max 模式像是没生效**：总开关关闭时子开关是锁定的。如果改的是 `smartPack` 或 `includeToolActivity`，需要刷新页面——这两项在 overlay 挂载时读一次。
+- **Max 模式像是没生效**：总开关关闭时下面的设置是收起的，先确认总开关已经打开。如果改的是 `smartPack` 或 `includeToolActivity`，需要刷新页面——这两项在 overlay 挂载时读一次。
 - **Max 模式下预测还是单行**：`allowMultiline` 关着、`maxSuggestionChars` 被调到了默认值以下，或者模型自己选择了单行（这是允许的）。
 
 ## 已知限制

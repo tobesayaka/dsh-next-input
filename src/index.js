@@ -63,8 +63,13 @@ const DEFAULTS = {
   allowMultiline: true,
   /** `model` lets the model use its own default effort instead of the lowest. */
   reasoningEffort: 'model',
-  retryOnFailure: true,
-  predictOnEndOnly: true,
+  /**
+   * Off by default: a retry doubles the cost of a failing prediction, and a
+   * prediction on Session open spends a call before the user asked for anything.
+   * Both stay available as opt-in switches.
+   */
+  retryOnFailure: false,
+  predictOnEndOnly: false,
   promptVariant: 'next',
 };
 

@@ -2355,31 +2355,40 @@ window.__ModuleLoader__.load({
           );
         };
 
+        // While Max mode is off, every switch and budget below is inert: the Host
+        // reads none of them, and the prediction runs on the 0.5.x constants. They
+        // used to render disabled and half-transparent, which made the page long
+        // and looked broken rather than "not currently in force". Nothing but the
+        // master switch now renders while it is off; the form still carries the
+        // values, so saving with Max off keeps the choices and turning it back on
+        // restores them — `maxModeHint` says both of those things.
         const maxModeSection = () => section(t('sectionMax'), [
           switchRow(t('maxModeLabel'), t('maxModeHint'), form.maxMode, (value) => update('maxMode', value)),
-          subSwitch('includeToolActivityLabel', 'includeToolActivityHint', 'includeToolActivity'),
-          subSwitch('smartPackLabel', 'smartPackHint', 'smartPack'),
-          subSwitch('allowMultilineLabel', 'allowMultilineHint', 'allowMultiline'),
-          enumRow(t('reasoningEffortLabel'), t('reasoningEffortHint'), 'reasoningEffort',
-            ['model', 'low', 'medium', 'high'], {
-              model: t('effortModel'),
-              low: t('effortLow'),
-              medium: t('effortMedium'),
-              high: t('effortHigh'),
-            }),
-          subSwitch('retryOnFailureLabel', 'retryOnFailureHint', 'retryOnFailure'),
-          subSwitch('predictOnEndOnlyLabel', 'predictOnEndOnlyHint', 'predictOnEndOnly'),
-          enumRow(t('promptVariantLabel'), t('promptVariantHint'), 'promptVariant',
-            ['legacy', 'next'], {
-              legacy: t('variantLegacy'),
-              next: t('variantNext'),
-            }),
-          React.createElement('div', { style: HINT }, t('maxModeBudgets')),
-          budgetRow('maxTokensLabel', 'maxTokens'),
-          budgetRow('maxContextCharsLabel', 'maxContextChars'),
-          budgetRow('maxMessagesLabel', 'maxMessages'),
-          budgetRow('maxSuggestionCharsLabel', 'maxSuggestionChars'),
-          React.createElement('div', { style: HINT }, t('maxModeInert')),
+          ...(form.maxMode !== true ? [] : [
+            subSwitch('includeToolActivityLabel', 'includeToolActivityHint', 'includeToolActivity'),
+            subSwitch('smartPackLabel', 'smartPackHint', 'smartPack'),
+            subSwitch('allowMultilineLabel', 'allowMultilineHint', 'allowMultiline'),
+            enumRow(t('reasoningEffortLabel'), t('reasoningEffortHint'), 'reasoningEffort',
+              ['model', 'low', 'medium', 'high'], {
+                model: t('effortModel'),
+                low: t('effortLow'),
+                medium: t('effortMedium'),
+                high: t('effortHigh'),
+              }),
+            subSwitch('retryOnFailureLabel', 'retryOnFailureHint', 'retryOnFailure'),
+            subSwitch('predictOnEndOnlyLabel', 'predictOnEndOnlyHint', 'predictOnEndOnly'),
+            enumRow(t('promptVariantLabel'), t('promptVariantHint'), 'promptVariant',
+              ['legacy', 'next'], {
+                legacy: t('variantLegacy'),
+                next: t('variantNext'),
+              }),
+            React.createElement('div', { style: HINT }, t('maxModeBudgets')),
+            budgetRow('maxTokensLabel', 'maxTokens'),
+            budgetRow('maxContextCharsLabel', 'maxContextChars'),
+            budgetRow('maxMessagesLabel', 'maxMessages'),
+            budgetRow('maxSuggestionCharsLabel', 'maxSuggestionChars'),
+            React.createElement('div', { style: HINT }, t('maxModeInert')),
+          ]),
         ]);
 
         if (loading) {
@@ -2527,7 +2536,7 @@ window.__ModuleLoader__.load({
         sectionUsage: '用量（累计）',
         sectionMax: 'Max 模式',
         maxModeLabel: '启用 Max 模式',
-        maxModeHint: '对标 Codex 预测的改进，按下面的子项生效。关闭时完全使用当前逻辑，行为不变。',
+        maxModeHint: '对标 Codex 预测的改进，按下面的子项生效。关闭时完全使用当前逻辑，行为不变；此时下面的设置会收起，但已保存的选择会保留，重新打开即恢复。',
         maxModeBudgets: '以下四项只在 Max 模式开启时生效；关闭时固定使用 8000 字符 / 24 条 / 512 token / 140 字符。',
         maxModeRangeHint: '可调范围',
         maxModeInert: '这些子项决定预测如何构建；总开关关闭时只保存选择，不生效。',
@@ -2612,7 +2621,7 @@ window.__ModuleLoader__.load({
         sectionUsage: 'Usage (cumulative)',
         sectionMax: 'Max mode',
         maxModeLabel: 'Enable Max mode',
-        maxModeHint: 'The improvements modelled on Codex predictions, each gated below. While off, predictions use the current logic and behaviour does not change.',
+        maxModeHint: 'The improvements modelled on Codex predictions, each gated below. While off, predictions use the current logic and behaviour does not change; the settings below are then hidden, but the choices you saved are kept and come back when you turn it on.',
         maxModeBudgets: 'These four apply only while Max mode is on; with it off the prediction uses a fixed 8000 characters / 24 messages / 512 tokens / 140 characters.',
         maxModeRangeHint: 'Range',
         maxModeInert: 'These switches decide how a prediction is built; while the master switch is off they only store the choice.',

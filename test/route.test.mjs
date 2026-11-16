@@ -381,6 +381,9 @@ test('serves a cached prediction by answer identity and honors dismissal', async
 });
 
 test('advertises predictOnActivate on cache misses (the default)', async () => {
+  // `predictOnEndOnly` ships off, so a plain install does ask for the extra call
+  // on Session open. That is the point of these two cases: the older
+  // `predictOnActivate` switch, and the Max mode override above it.
   const defaults = install(goodStream);
   const defaultsCache = defaults.routes.get('/api/next-input.cached');
   const missing = await (await defaultsCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
@@ -392,11 +395,18 @@ test('advertises predictOnActivate on cache misses (the default)', async () => {
   const offMissing = await (await offCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
   assert.equal(offMissing.predictOnActivate, false);
 
-  // Max mode's "only predict after an answer" wins over the older switch.
-  const max = install(goodStream, { maxMode: true, predictOnActivate: true });
+  // Max mode's "only predict after an answer" now has to be asked for: it ships
+  // off, so turning it on is what makes it suppress the open-time call.
+  const max = install(goodStream, { maxMode: true, predictOnActivate: true, predictOnEndOnly: true });
   const maxCache = max.routes.get('/api/next-input.cached');
   const maxMissing = await (await maxCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
   assert.equal(maxMissing.predictOnActivate, false);
+
+  // With Max mode on but that sub-switch off, the older switch still decides.
+  const maxOpen = install(goodStream, { maxMode: true, predictOnActivate: true, predictOnEndOnly: false });
+  const maxOpenCache = maxOpen.routes.get('/api/next-input.cached');
+  const maxOpenMissing = await (await maxOpenCache.fetch(cachedRequest('session-1', 'seq:2'))).json();
+  assert.equal(maxOpenMissing.predictOnActivate, true);
 
   // While Max mode is off the older switch is the only one that counts.
   const inert = install(goodStream, { maxMode: false, predictOnActivate: true, predictOnEndOnly: true });
@@ -571,6 +581,10 @@ test('round-trips the Max mode settings and applies them to a prediction', async
   assert.equal(initial.values.maxMode, false);
   assert.equal(initial.values.reasoningEffort, 'model');
   assert.equal(initial.values.promptVariant, 'next');
+  // Both of these spend money the user did not ask for — a second attempt, or a
+  // prediction before the session is even read — so they ship off.
+  assert.equal(initial.values.retryOnFailure, false, 'retry ships off');
+  assert.equal(initial.values.predictOnEndOnly, false, 'predict-on-open ships off');
 
   const saved = await settings.fetch(settingsRequest('POST', {
     values: {
@@ -669,11 +683,25 @@ test('Max mode retries once after a failed attempt', async () => {
     yield { type: 'text-delta', index: 0, text: 'Run the uploader tests.' };
     yield { type: 'finish', reason: { kind: 'stop' } };
   }
-  const { route } = install(flakyStream, { maxMode: true });
+  // The retry is opt-in, so this asks for it rather than relying on a default.
+  const { route } = install(flakyStream, { maxMode: true, retryOnFailure: true });
   const response = await route.fetch(requestFor({ ...conversation, answerKey: 'seq:retry' }));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).suggestion, 'Run the uploader tests.');
   assert.equal(attempts, 2);
+});
+
+test('Max mode does not retry unless the retry switch is on', async () => {
+  let attempts = 0;
+  async function* flakyStream() {
+    attempts += 1;
+    yield { type: 'finish', reason: { kind: 'error', failure: { code: 'AUTH', message: 'transient' } } };
+  }
+  // Max mode on, retry left at its default: one attempt, then the failure.
+  const { route } = install(flakyStream, { maxMode: true });
+  const response = await route.fetch(requestFor({ ...conversation, answerKey: 'seq:noretry' }));
+  assert.equal(response.status, 502);
+  assert.equal(attempts, 1);
 });
 
 test('without Max mode a failed attempt is not retried', async () => {

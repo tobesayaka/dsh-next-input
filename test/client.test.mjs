@@ -496,7 +496,7 @@ function labelsOf(tree) {
   return new Map(found.map((props) => [props['aria-label'], props]));
 }
 
-test('renders the Max mode section with its sub-switches locked while off', async () => {
+test('the Max mode settings are hidden while the master switch is off', async () => {
   const settings = {
     values: {
       maxSuggestionChars: 400, maxContextChars: 32000, maxMessages: 64, maxTokens: 1024, timeoutMs: 20000,
@@ -532,19 +532,36 @@ test('renders the Max mode section with its sub-switches locked while off', asyn
   // `t()` resolves through the locale service, so labels are the English copy.
   assert.ok(controls.has('Enable Max mode'), 'the master switch renders');
   assert.equal(controls.get('Enable Max mode').disabled, false, 'the master switch is always editable');
-  for (const label of ['Include tool activity', 'Improved context packing', 'Allow multiline suggestions',
+
+  const subtitles = ['Include tool activity', 'Improved context packing', 'Allow multiline suggestions',
     'Reasoning effort', 'Retry on failure', 'Only predict after an answer', 'Prediction prompt',
-    // The four numeric budgets moved into this section and follow the switch.
-    'Max output tokens', 'Max context characters', 'Max messages', 'Max suggestion characters']) {
-    assert.ok(controls.has(label), label + ' renders');
-    assert.equal(controls.get(label).disabled, true, label + ' is locked while Max mode is off');
+    // The four numeric budgets belong to this section too.
+    'Max output tokens', 'Max context characters', 'Max messages', 'Max suggestion characters'];
+  for (const label of subtitles) {
+    assert.ok(!controls.has(label), label + ' is hidden while Max mode is off');
   }
-  // The timeout is not a Max mode budget, so it stays editable outside it.
-  assert.equal(controls.get('Timeout (ms)').disabled, false, 'the timeout stays editable');
-  // Each budget shows the range the Host accepts next to the input.
-  const texts = textOf(tree);
+  // Their ranges go with them: nothing about an inert setting should render.
+  const offTexts = textOf(tree);
   for (const range of ['Range 64–4096', 'Range 1000–50000', 'Range 2–100', 'Range 20–500']) {
-    assert.ok(texts.includes(range), range + ' renders');
+    assert.ok(!offTexts.includes(range), range + ' is hidden with its budget');
+  }
+  // The timeout is not a Max mode setting, so it stays visible and editable.
+  assert.equal(controls.get('Timeout (ms)').disabled, false, 'the timeout stays editable');
+
+  // Turning the master switch on reveals everything again, and nothing is left
+  // disabled: the settings are now in force. Rendered once rather than settled:
+  // this harness re-runs every effect on each render, so settling here would let
+  // the initial load fetch overwrite the toggled form state.
+  controls.get('Enable Max mode').onClick();
+  const onTree = harness.render();
+  const on = labelsOf(onTree);
+  for (const label of subtitles) {
+    assert.ok(on.has(label), label + ' appears once Max mode is on');
+    assert.equal(on.get(label).disabled, false, label + ' is editable while Max mode is on');
+  }
+  const onTexts = textOf(onTree);
+  for (const range of ['Range 64–4096', 'Range 1000–50000', 'Range 2–100', 'Range 20–500']) {
+    assert.ok(onTexts.includes(range), range + ' returns with its budget');
   }
 });
 

@@ -160,8 +160,10 @@ same single-line cleaning, same context packing, same lowest reasoning effort.
 
 Switch it on in **Settings → Next input → Max mode**. The master switch gates
 seven sub-switches plus the four budgets described below; each sub-switch can be
-turned off on its own to find out which change helped, and the budgets stay
-locked while the master switch is off.
+turned off on its own to find out which change helped. While the master switch is
+off, all of them are hidden and only the switch itself shows — they have no effect
+then, and hiding them says that more clearly than a column of greyed-out controls.
+The choices you saved stay stored and come back when you switch it on again.
 
 | Sub-switch | Key | What it changes |
 |---|---|---|
@@ -259,8 +261,8 @@ page stores overrides in the plugin's settings file.
 | `smartPack` | `true` | Reserve the opening request when packing context. Only read in Max mode. |
 | `allowMultiline` | `true` | Keep line breaks; lifts the suggestion cap to `400` while `maxSuggestionChars` is at its default. Only read in Max mode. |
 | `reasoningEffort` | `'model'` | `model` / `low` / `medium` / `high`. Only read in Max mode. |
-| `retryOnFailure` | `true` | One backoff retry inside `timeoutMs`. Only read in Max mode. |
-| `predictOnEndOnly` | `true` | Ignore `predictOnActivate`. Only read in Max mode. |
+| `retryOnFailure` | `false` | One backoff retry inside `timeoutMs`. Only read in Max mode. |
+| `predictOnEndOnly` | `false` | Ignore `predictOnActivate`. Only read in Max mode. |
 | `promptVariant` | `'next'` | `legacy` / `next`. Only read in Max mode. |
 
 The two enum keys are validated: an unknown `reasoningEffort` or
@@ -320,9 +322,10 @@ plugin row or turn off `predictOnActivate` to stop the extra calls.
   plugin, then reopen Settings → Plugins.
 - **Prediction never appears:** check that the composer is empty, the Session is
   idle, and `llm.listProviders()` still contains the selected route.
-- **Max mode seems to do nothing:** the sub-switches are locked while the master
-  switch is off. If you changed `smartPack` or `includeToolActivity`, refresh the
-  page — those two are read once when the composer mounts.
+- **Max mode seems to do nothing:** its settings are hidden while the master
+  switch is off, so check that it is on first. If you changed `smartPack` or
+  `includeToolActivity`, refresh the page — those two are read once when the
+  composer mounts.
 - **A prediction still comes out as one line in Max mode:** `allowMultiline` is
   off, `maxSuggestionChars` was lowered below the default, or the model chose a
   single line, which is allowed.

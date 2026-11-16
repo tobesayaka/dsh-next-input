@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+- **The Max mode settings are hidden while the master switch is off.** They used to render everywhere, disabled and half-transparent, which made the settings page long and read as broken rather than "not currently in force". With Max mode off the section now shows only its master switch; turning it on brings the seven sub-switches and four budgets back.
+- **Retry on failure and Only predict after an answer now default to off.** Both spend a call the user did not ask for: a retry doubles the cost of a failing prediction, and predicting on Session open spends one before anything has been asked. Both remain available as opt-in switches. If you had Max mode on and relied on the old defaults, turn them on in the Max mode section.
+- The master switch's hint states both halves: while it is off the controls are hidden, and the choices you already saved are kept and restored when you turn it back on. Nothing about the stored values, the save, or a prediction changed — with Max mode off the Host still ignores those keys and runs on the fixed 0.5.x constants.
+
 ## 1.1.0
 
 - **A manual prediction trigger in the composer tool row.** A small outlined icon button now sits next to the attach control, the mode chips, and the model selector, and asks for a fresh prediction of the answer on screen. It produces the same ghost text as the automatic prediction, so accepting it is still `Tab`; it never writes to the draft and never sends. Use it when no prediction appeared, when `Esc` dismissed one, or when you want a different suggestion for the same answer.
