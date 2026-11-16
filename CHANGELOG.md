@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- **A manual prediction trigger in the composer tool row.** A small icon button now sits in the row that holds the attach control, the mode chips, and the model selector, and asks for a fresh prediction of the answer on screen. It produces the same ghost text as the automatic prediction, so accepting it is still `Tab`; it never writes to the draft and never sends. Use it when no prediction appeared, when `Esc` dismissed one, or when you want a different suggestion for the same answer.
+- The button is disabled whenever a prediction cannot land: no settled answer yet, the assistant is still running, a draft is present, the composer is mid-submission, or a call is already in flight (with a pulsing icon). Its tooltip states which of those applies.
+- A manual click bypasses only the page-local "this answer was already predicted" guards. The Host's one-call-per-answer-in-flight refusal, the cache, and the superseded-response guard all still apply, and a second click while a call is running is dropped before it reaches the network.
+
 ## 1.0.1
 
 - **The Max mode prompt makes structure the default instead of an exception.** The previous wording asked for a list only when the next message carried more than one decision, so a model that judged the turn single-point fell back to one line, and a terse user history pulled it further toward short sentences. The rule now reads `Default to structure`: several decisions, points, questions, or observations, a command or error to paste, or a verdict with its reasons is the normal shape, and one line is the fallback for a genuinely single-point message.

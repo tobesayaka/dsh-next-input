@@ -27,6 +27,57 @@ window.__ModuleLoader__.load({
     const SETTLE_DELAY_MS = 50;
     const EMPTY = [];
 
+    /**
+     * The manual trigger in the composer tool row has to reach the prediction
+     * engine, which lives inside the overlay component's own state and effects.
+     * The two are separate slot entries in separate React trees, so the overlay
+     * publishes the one call it wants exposed under its Session id, and the
+     * button looks it up when clicked. The map is keyed by Session because one
+     * page can hold the main composer plus a subagent composer in the Sidebar.
+     * @type {Map<string, { busy: boolean, running: boolean, ready: boolean, snapshot?: { available: boolean, busy: boolean, running: boolean, ready: boolean }, request: () => void }>}
+     */
+    const engines = new Map();
+    /** Everyone who renders a manual-trigger button, notified on any engine change. */
+    const engineWatchers = new Set();
+
+    /** The state every button shows for a Session that has no mounted overlay. */
+    const NO_ENGINE = Object.freeze({ available: false, busy: false, running: false, ready: false });
+
+    /** Tell every button to re-read its engine. Never throws into a caller. */
+    function publishEngines() {
+      for (const notify of [...engineWatchers]) {
+        try {
+          notify();
+        } catch {
+          // A disabled button is not worth breaking a prediction over.
+        }
+      }
+    }
+
+    function subscribeEngines(notify) {
+      engineWatchers.add(notify);
+      return () => engineWatchers.delete(notify);
+    }
+
+    /**
+     * The snapshot one button compares against. The returned object keeps its
+     * identity while nothing changed, which is what `useSyncExternalStore`
+     * requires to avoid a render loop.
+     * @param {string | undefined} sessionId
+     */
+    function engineSnapshot(sessionId) {
+      const record = typeof sessionId === 'string' ? engines.get(sessionId) : undefined;
+      if (record === undefined) return NO_ENGINE;
+      const busy = record.busy === true;
+      const running = record.running === true;
+      const ready = record.ready === true;
+      const previous = record.snapshot;
+      if (previous === undefined
+        || previous.busy !== busy || previous.running !== running || previous.ready !== ready) {
+        record.snapshot = { available: true, busy, running, ready };
+      }
+      return record.snapshot;
+    }
 
     const CSS = `
 [${GHOST_ATTR}] [data-composer-placeholder]{visibility:hidden !important}
@@ -645,6 +696,12 @@ window.__ModuleLoader__.load({
       const [box, setBox] = React.useState(null);
       const [fallbackReady, setFallbackReady] = React.useState(false);
       const [restoreTick, setRestoreTick] = React.useState(0);
+      // True while a prediction is in flight, so the manual trigger can disable
+      // itself instead of letting a double click spend two calls. The ref holds
+      // the same fact without waiting for a render: two clicks in one frame both
+      // read the state from before either of them ran.
+      const [busy, setBusy] = React.useState(false);
+      const busyRef = React.useRef(false);
 
       draftRef.current = typeof draft === 'string' ? draft : '';
       phaseRef.current = phase;
@@ -667,6 +724,10 @@ window.__ModuleLoader__.load({
           abortRef.current.abort();
           abortRef.current = null;
         }
+        // A cancelled prediction never reaches its own `finally` with the
+        // current sequence, so the busy flag is released here.
+        busyRef.current = false;
+        setBusy(false);
       };
 
       const clearSuggestion = () => {
@@ -786,8 +847,22 @@ window.__ModuleLoader__.load({
         window.requestAnimationFrame(() => submitDraft(0));
       };
 
-      const generate = async () => {
+      /**
+       * Ask the Host for one prediction of the latest answer.
+       *
+       * `force` is the manual trigger in the composer tool row: it skips only
+       * the two page-local "already did this answer" guards below, so a user can
+       * regenerate after an Esc, a failed call, or just to see a different
+       * suggestion. The Host still refuses a second call while one is in
+       * flight, and the sequence guard still drops a superseded response.
+       * @param {boolean} [force]
+       */
+      const generate = async (force = false) => {
         if (!mountedRef.current) return;
+        // A manual click while one is already running would spend a second call
+        // for the same answer. The scheduled path is allowed to supersede work,
+        // which is why the guard is limited to `force`.
+        if (force && busyRef.current) return;
         if (draftRef.current !== '' || runningRef.current || phaseRef.current !== 'plain') return;
         const sessions = ctx.get('sessions');
         const session = sessionRef.current;
@@ -805,10 +880,11 @@ window.__ModuleLoader__.load({
           return;
         }
         // One answer, one model call per page: remounts and route effects that
-        // repeat for the same answer must not spend tokens again.
+        // repeat for the same answer must not spend tokens again. A manual
+        // trigger opts out — that is the whole point of the button.
         const answerId = session + '|' + (conversation.answerKey ?? '');
         const marks = readMarks();
-        if (requestedRef.current.has(answerId) || marks.hit === answerId) return;
+        if (!force && (requestedRef.current.has(answerId) || marks.hit === answerId)) return;
         requestedRef.current.add(answerId);
         mark({ t0: String(Date.now()), key: answerId });
 
@@ -820,6 +896,8 @@ window.__ModuleLoader__.load({
         // The Host enforces its own timeout; this bound keeps a stalled carrier
         // from leaving the prediction pending forever.
         const timeout = window.setTimeout(() => controller.abort(), 25000);
+        busyRef.current = true;
+        setBusy(true);
 
         try {
           const response = await fetch(ROUTE, {
@@ -863,6 +941,12 @@ window.__ModuleLoader__.load({
         } finally {
           window.clearTimeout(timeout);
           if (abortRef.current === controller) abortRef.current = null;
+          // Only the current attempt clears the flag: an aborted predecessor
+          // finishing late must not re-enable the button under a live call.
+          if (seq === requestSeqRef.current) {
+            busyRef.current = false;
+            setBusy(false);
+          }
         }
       };
 
@@ -874,6 +958,40 @@ window.__ModuleLoader__.load({
           void generate();
         }, delay);
       };
+
+      // Publish the one call the composer's manual trigger is allowed to make.
+      // The button asks for a fresh prediction of the answer on screen; it never
+      // touches the draft or submits anything. Re-registered only when something
+      // it reports changes — the draft and phase are the button's own business,
+      // so typing must not make this half rescan the event window.
+      React.useEffect(() => {
+        const session = sessionId;
+        if (typeof session !== 'string' || session === '') return undefined;
+        // `ready` means "a settled answer is on screen". It is the same condition
+        // `generate` refuses on, so the button degrades to disabled instead of
+        // offering a click that would silently do nothing.
+        const sessions = ctx.get('sessions');
+        const conversation = readConversation(sessions, session, maxRef.current);
+        const last = conversation.messages[conversation.messages.length - 1];
+        const ready = conversation.model !== null && last !== undefined && last.role === 'assistant';
+        const record = {
+          busy,
+          running,
+          ready,
+          request: () => {
+            // A pending scheduled prediction would double up with this one.
+            clearTimer();
+            attemptsRef.current = 0;
+            void generate(true);
+          },
+        };
+        engines.set(session, record);
+        publishEngines();
+        return () => {
+          if (engines.get(session) === record) engines.delete(session);
+          publishEngines();
+        };
+      }, [sessionId, busy, running, restoreTick]);
 
       // Read the Max mode switches once per mount. Packing happens here, so the
       // Host's values have to reach this half; a failed read keeps `null`, and
@@ -1483,6 +1601,130 @@ window.__ModuleLoader__.load({
           border: 0,
         },
       }, announce));
+      };
+    }
+
+    /**
+     * The manual trigger in the composer's tool row, left of the attach button.
+     *
+     * It renders one compact icon button and asks whichever prediction engine is
+     * mounted for this Session to produce a fresh suggestion. It never writes to
+     * the draft and never submits: the ghost it produces is still accepted with
+     * Tab, exactly like the automatic one. The button keeps its own state so a
+     * double click cannot spend two calls, and it lives in a different slot from
+     * the overlay, so it degrades to "disabled" when no engine is mounted.
+     * @param {any} ctx
+     */
+    function createPredictButton(ctx) {
+      // The same neutral shape other composer tool-row controls use: a quiet
+      // 28px hit target that only gains a surface on hover. The host's own `+`
+      // is a filled circle, so a second filled circle here would read as a
+      // duplicate of it.
+      const BUTTON = {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: 'none',
+        width: 28,
+        height: 28,
+        padding: 0,
+        border: 0,
+        borderRadius: 7,
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-secondary)',
+        cursor: 'pointer',
+      };
+      const BUTTON_OFF = { ...BUTTON, opacity: 0.45, cursor: 'default' };
+      // Inline styles cannot express :hover / :focus-visible / the busy pulse, so
+      // the one button carries its own small sheet rather than a plugin-wide
+      // class. Every token is an alias, so light/dark switching needs no work.
+      const BUTTON_CSS = `
+[data-dsh-next-input-trigger]{transition:background .12s ease}
+[data-dsh-next-input-trigger]:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
+[data-dsh-next-input-trigger]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+[data-dsh-next-input-trigger][aria-busy="true"] svg{animation:dsh-next-input-pulse 1.1s ease-in-out infinite}
+@keyframes dsh-next-input-pulse{0%,100%{opacity:.4}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){[data-dsh-next-input-trigger]{transition:none}[data-dsh-next-input-trigger][aria-busy="true"] svg{animation:none;opacity:.6}}
+`;
+
+      return function PredictButton(props) {
+        const options = props || {};
+        const sessionId = typeof options.sessionId === 'string' ? options.sessionId : undefined;
+        // The composer's own state decides whether a prediction would land in a
+        // usable place: a draft means the user is already typing, and a non-plain
+        // phase means the composer is mid-submission. Read it here rather than
+        // through the engine so typing never touches the overlay's event scan.
+        const useInput = typeof options.useInput === 'function'
+          ? options.useInput
+          : (select) => select({ draft: '', phase: 'plain' });
+        const draft = useInput((state) => (state !== null && state !== undefined && typeof state.draft === 'string' ? state.draft : ''));
+        const phase = useInput((state) => (state !== null && state !== undefined && typeof state.phase === 'string' ? state.phase : 'inert'));
+
+        // Re-read on every locale revision, like the overlay: the dictionary may
+        // register after this entry first rendered.
+        React.useSyncExternalStore(
+          React.useCallback((notify) => subscribeLocale(ctx, notify), []),
+          () => localeRevision(ctx),
+          () => 0,
+        );
+        const t = (key) => translate(ctx, key);
+
+        const engine = React.useSyncExternalStore(
+          React.useCallback((notify) => subscribeEngines(notify), []),
+          () => engineSnapshot(sessionId),
+          () => NO_ENGINE,
+        );
+        // The engine is the source of truth: it knows whether a settled answer is
+        // on screen and whether a call is already running. The button adds the
+        // composer-state half it can read itself.
+        const mounted = engine.available === true;
+        const writable = draft === '' && phase === 'plain';
+        const ready = mounted && engine.ready === true && engine.running !== true && writable;
+        const disabled = !ready || engine.busy === true;
+        const label = !mounted
+          ? t('predictUnavailable')
+          : engine.running === true ? t('predictRunning')
+            : engine.ready !== true ? t('predictNotReady')
+              : !writable ? t('predictComposerBusy')
+                : engine.busy === true ? t('predictPending')
+                  : t('predictManual');
+
+        return h(React.Fragment, null,
+          h('style', { key: 'style' }, BUTTON_CSS),
+          h('button', {
+            type: 'button',
+            key: 'button',
+            'data-dsh-next-input-trigger': '',
+            title: label,
+            'aria-label': label,
+            'aria-busy': engine.busy === true ? 'true' : undefined,
+            disabled,
+            style: disabled ? BUTTON_OFF : BUTTON,
+            // Keep the caret in the editor: clicking a toolbar control must not
+            // steal focus from the composer the ghost is painted into.
+            onMouseDown: (event) => event.preventDefault(),
+            onClick: () => {
+              if (disabled) return;
+              const record = typeof sessionId === 'string' ? engines.get(sessionId) : undefined;
+              if (record !== undefined) record.request();
+            },
+          }, h('svg', {
+            width: 15,
+            height: 15,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            'aria-hidden': 'true',
+            focusable: 'false',
+          },
+          h('path', {
+            d: 'M6.2 2.4l.9 2.3 2.3.9-2.3.9-.9 2.3-.9-2.3-2.3-.9 2.3-.9z',
+            fill: 'currentColor',
+          }),
+          h('path', {
+            d: 'M11.4 8.6l.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55z',
+            fill: 'currentColor',
+            opacity: 0.75,
+          }))));
       };
     }
 
@@ -2172,6 +2414,12 @@ window.__ModuleLoader__.load({
         fallback: '预测',
         announce: '有可用的下一步输入预测，按 Tab 采纳。',
         announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
+        predictManual: '预测下一句话',
+        predictPending: '正在预测…',
+        predictRunning: 'AI 正在回答，等它结束后再预测',
+        predictNotReady: '还没有可预测的回答：先等 AI 答完',
+        predictComposerBusy: '先清空输入框，等它回到可编辑状态',
+        predictUnavailable: '预测组件尚未就绪',
         settingsNav: '下一步输入',
         settingsTitle: '下一步输入',
         settingsIntro: '每次回答结束后预测你的下一句话，以浅色文字预填在输入框内，按 Tab 采纳。修改会应用到下一次预测。',
@@ -2250,6 +2498,12 @@ window.__ModuleLoader__.load({
         fallback: 'Prediction',
         announce: 'A next-input prediction is available. Press Tab to accept.',
         announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
+        predictManual: 'Predict the next message',
+        predictPending: 'Predicting…',
+        predictRunning: 'The assistant is still answering; predict after it settles',
+        predictNotReady: 'No settled answer to predict yet: wait for the answer',
+        predictComposerBusy: 'Empty the composer and wait until it is editable',
+        predictUnavailable: 'The predictor is not ready yet',
         settingsNav: 'Next input',
         settingsTitle: 'Next input',
         settingsIntro: 'Predicts your next message after each answer and offers it as ghost text: press Tab to accept. Changes apply to the next prediction.',
@@ -2381,6 +2635,18 @@ window.__ModuleLoader__.load({
           id: 'next-input',
           order: 6,
         }, createComposerNextInput(ctx)));
+
+        // The manual trigger shares the composer tool row with the attach button,
+        // the mode chips, and the model selector. `conversation.input.left` is the
+        // host's left-hand control list, so the button sits at the start of that
+        // row; `order: 20` keeps it after the host's own `+` and mode chips rather
+        // than before them, and the row hides it automatically while a toolbar
+        // activity such as voice input is expanded.
+        ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+          name: 'conversation.input.left',
+          id: 'next-input-trigger',
+          order: 20,
+        }, createPredictButton(ctx)));
       },
     };
     if (typeof window !== 'undefined' && window.__DSH_NEXT_INPUT_TEST__ === true) {
