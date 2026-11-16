@@ -47,10 +47,12 @@ function loadClient(storage, options = {}) {
         return 0;
       },
       cancelAnimationFrame() {},
-      setTimeout() {
-        return 0;
-      },
-      clearTimeout() {},
+      setTimeout: options.setTimeout === undefined
+        ? () => 0
+        : options.setTimeout,
+      clearTimeout: options.clearTimeout === undefined
+        ? () => {}
+        : options.clearTimeout,
       getComputedStyle() {
         return {};
       },
@@ -58,9 +60,16 @@ function loadClient(storage, options = {}) {
     document: {
       addEventListener() {},
       removeEventListener() {},
+      // Session marks live on the root element. Without one `mark()` swallows its
+      // failure and `readMarks()` is always empty, so a test cannot put the page
+      // into the "this answer was already predicted" state.
+      documentElement: options.documentElement === undefined
+        ? undefined
+        : options.documentElement,
     },
     queueMicrotask,
     console,
+    URLSearchParams,
     fetch: options.fetch === undefined
       ? async () => {
         throw new Error('not used');
@@ -731,4 +740,231 @@ test('an absolute tool path is shortened to match how the transcript names it', 
   assert.match(summary, /edit …\/overlay\/overlay_darwin\.m/u);
   assert.doesNotMatch(summary, /\/Users\/ming/u);
   assert.match(summary, /edit src\/client\.js/u, 'relative paths are untouched');
+});
+
+// ---------------------------------------------------------------------------
+// The manual prediction trigger. These mount the overlay for real, because the
+// button and the prediction engine only meet through the module-level `engines`
+// map: registering a slot is not enough to prove the two are wired together.
+// ---------------------------------------------------------------------------
+
+/**
+ * A React stand-in that behaves enough like the real one for the overlay: hook
+ * slots survive a re-render, `useSyncExternalStore` reads its selector, and
+ * effects are re-run after each render (with their cleanups).
+ */
+function hookHarness() {
+  const hooks = { slots: [], effects: [] };
+  let cursor = 0;
+  const api = {
+    Fragment: Symbol('Fragment'),
+    createElement(type, props, ...children) {
+      return { type, props: props === null || props === undefined ? {} : props, children: children.flat(Infinity) };
+    },
+    useRef(value) {
+      const index = cursor;
+      cursor += 1;
+      if (hooks.slots[index] === undefined) hooks.slots[index] = { kind: 'ref', current: value };
+      return hooks.slots[index];
+    },
+    useState(initial) {
+      const index = cursor;
+      cursor += 1;
+      if (hooks.slots[index] === undefined) hooks.slots[index] = { kind: 'state', value: initial };
+      const slot = hooks.slots[index];
+      return [slot.value, (next) => {
+        slot.value = typeof next === 'function' ? next(slot.value) : next;
+      }];
+    },
+    useEffect(fn) {
+      hooks.effects.push(fn);
+    },
+    useLayoutEffect(fn) {
+      hooks.effects.push(fn);
+    },
+    useSyncExternalStore(subscribe, getSnapshot) {
+      return getSnapshot();
+    },
+    useCallback(fn) {
+      return fn;
+    },
+    useMemo(fn) {
+      return fn();
+    },
+  };
+  return {
+    api,
+    /** Render once, then run every effect this render produced. */
+    render(component, props) {
+      cursor = 0;
+      hooks.effects = [];
+      const tree = component(props);
+      const cleanups = [];
+      for (const effect of hooks.effects) {
+        const cleanup = effect();
+        if (typeof cleanup === 'function') cleanups.push(cleanup);
+      }
+      return { tree, cleanups };
+    },
+  };
+}
+
+/** A Session binding the client's `readConversation` accepts, with one answer. */
+function answeredSession() {
+  const entries = [
+    { type: 'event', event: { type: 'user/message', seq: 1, surfaceOp: 'append', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'please fix the scheduler' }] } } },
+    {
+      type: 'event',
+      event: {
+        type: 'assistant/message',
+        seq: 2,
+        surfaceOp: 'append',
+        data: { message: { source: { kind: 'model', provider: 'p', model: 'm' }, content: [{ type: 'text', text: 'Fixed it.' }] } },
+      },
+    },
+  ];
+  return {
+    binding() {
+      return { eventSource: { getSnapshot() { return { entries }; } }, projections: { faceOf() { return undefined; } } };
+    },
+    get() {
+      return undefined;
+    },
+  };
+}
+
+function predictionClient(fetchImpl, options = {}) {
+  const react = hookHarness();
+  // A controllable clock: the automatic prediction is only scheduled through
+  // `setTimeout`, so without somewhere to drain it the turn-end path can never
+  // be observed. Callbacks run in schedule order when a test asks for it.
+  const timers = new Map();
+  let nextTimer = 1;
+  const clock = {
+    setTimeout(fn, ms) {
+      const id = nextTimer;
+      nextTimer += 1;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    /** Run every pending callback, including the ones they schedule. */
+    async flush(limit = 50) {
+      for (let round = 0; round < limit && timers.size > 0; round += 1) {
+        const pending = [...timers.entries()];
+        timers.clear();
+        for (const [, entry] of pending) entry.fn();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    },
+  };
+  const client = loadClient(makeStorage(), {
+    react: react.api,
+    fetch: fetchImpl,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    documentElement: options.documentElement,
+  });
+  const registrations = [];
+  const ctx = {
+    locale: { register: () => () => {}, bind: () => (key) => key, getSnapshot: () => ({ active: 'en', revision: 0 }), subscribe: () => () => {} },
+    get(name) {
+      if (name === 'sessions') return options.sessions === undefined ? answeredSession() : options.sessions;
+      return undefined;
+    },
+    effect(fn) { fn(); },
+    slots: { inject(_k, cb) { cb(); }, register(o, c) { registrations.push({ options: o, component: c }); } },
+  };
+  client.apply(ctx);
+  return { react, registrations, client, clock };
+}
+
+test('the manual trigger registers in the composer tool row next to the overlay', () => {
+  const { registrations } = predictionClient(async () => {
+    throw new Error('not used');
+  });
+
+  const trigger = registrations.find((entry) => entry.options.name === 'conversation.input.left');
+  assert.ok(trigger, 'the button asks for a slot in the composer tool row');
+  assert.equal(trigger.options.id, 'next-input-trigger');
+  // Same plugin, different slot entry: the button and the ghost overlay must not
+  // collide, and the row only orders entries inside its own list.
+  assert.equal(trigger.options.order, 20);
+  const overlay = registrations.find((entry) => entry.options.name === 'conversation.input.overlay');
+  assert.ok(overlay, 'the ghost overlay is still registered');
+  assert.notEqual(trigger.options.id, overlay.options.id);
+  assert.equal(typeof trigger.component, 'function');
+});
+
+test('the manual trigger is disabled when no prediction engine is mounted', () => {
+  const { react, registrations } = predictionClient(async () => {
+    throw new Error('not used');
+  });
+  const trigger = registrations.find((entry) => entry.options.name === 'conversation.input.left').component;
+
+  // No overlay mounted: `engines` has no record for this Session.
+  const { tree } = react.render(trigger, {
+    sessionId: 'session-1',
+    useInput: (select) => select({ draft: '', phase: 'plain' }),
+  });
+  const button = tree.children.find((child) => child.type === 'button');
+  assert.ok(button, 'the button renders');
+  assert.equal(button.props.disabled, true, 'no engine means nothing to ask');
+  assert.match(button.props.title, /not ready/u, 'the tooltip explains the reason');
+  // A click while disabled must not throw: there is no record to call.
+  assert.doesNotThrow(() => button.props.onClick());
+});
+
+test('a manual click predicts an answer the page already predicted', async () => {
+  const calls = [];
+  // The Host answers every request, so the only thing that can suppress a call
+  // is a page-local guard. If either guard still ran, the second call would not
+  // appear at all.
+  const documentElement = {
+    attributes: new Map(),
+    getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null; },
+    setAttribute(name, value) { this.attributes.set(name, value); },
+  };
+  const { react, registrations, clock } = predictionClient(async (url) => {
+    const path = String(url);
+    if (path.includes('next-input.predict')) {
+      calls.push(path);
+      return { ok: true, json: async () => ({ suggestion: 'run the tests', enterToSend: false }) };
+    }
+    // Settings and cache reads share the transport; they are not predictions.
+    return { ok: true, json: async () => ({ values: { maxMode: false }, cached: false, predictOnActivate: false }) };
+  }, { documentElement });
+
+  const overlay = registrations.find((entry) => entry.options.name === 'conversation.input.overlay').component;
+  const trigger = registrations.find((entry) => entry.options.name === 'conversation.input.left').component;
+  const buttonProps = {
+    sessionId: 'session-1',
+    useInput: (select) => select({ draft: '', phase: 'plain' }),
+  };
+  const props = { ...buttonProps, useSession: (select) => select({ running: false }), inputActions: {} };
+
+  // Mount the overlay so it publishes an engine for this Session.
+  react.render(overlay, props);
+  await clock.flush();
+  const button = () => react.render(trigger, buttonProps).tree.children.find((child) => child.type === 'button');
+
+  assert.equal(button().props.disabled, false, 'a settled answer makes the button live');
+  calls.length = 0;
+
+  button().props.onClick();
+  await clock.flush();
+  assert.equal(calls.length, 1, 'the first click predicts');
+
+  // That call is what arms the guards: the answer id is now in the page's
+  // requested set and marked as answered on the root element.
+  assert.match(String(documentElement.getAttribute('data-dsh-next-input')), /hit:session-1\|seq:2/u,
+    'the answered mark is set, which is the state a plain prediction refuses on');
+
+  // Drain the cooldown, then click again: only the manual path gets here.
+  await clock.flush();
+  button().props.onClick();
+  await clock.flush();
+  assert.equal(calls.length, 2, 'a manual click ignores the page-local "already predicted" guards');
 });
