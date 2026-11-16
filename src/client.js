@@ -25,6 +25,14 @@ window.__ModuleLoader__.load({
     // leave the conversation budget intact.
     const MAX_TOOL_ACTIVITY_CHARS = 1200;
     const SETTLE_DELAY_MS = 50;
+    /**
+     * Cooldown after one completed manual prediction. `busyRef` only covers a
+     * request that is still in flight; a fast answer followed by a second click
+     * would otherwise pay for a whole extra model call. One second is short
+     * enough not to feel broken and long enough to absorb a double click that
+     * lands after the first response already arrived.
+     */
+    const MANUAL_COOLDOWN_MS = 1000;
     const EMPTY = [];
 
     /**
@@ -34,14 +42,14 @@ window.__ModuleLoader__.load({
      * publishes the one call it wants exposed under its Session id, and the
      * button looks it up when clicked. The map is keyed by Session because one
      * page can hold the main composer plus a subagent composer in the Sidebar.
-     * @type {Map<string, { busy: boolean, running: boolean, ready: boolean, snapshot?: { available: boolean, busy: boolean, running: boolean, ready: boolean }, request: () => void }>}
+     * @type {Map<string, { busy: boolean, cooling: boolean, running: boolean, ready: boolean, snapshot?: { available: boolean, busy: boolean, cooling: boolean, running: boolean, ready: boolean }, request: () => void }>}
      */
     const engines = new Map();
     /** Everyone who renders a manual-trigger button, notified on any engine change. */
     const engineWatchers = new Set();
 
     /** The state every button shows for a Session that has no mounted overlay. */
-    const NO_ENGINE = Object.freeze({ available: false, busy: false, running: false, ready: false });
+    const NO_ENGINE = Object.freeze({ available: false, busy: false, cooling: false, running: false, ready: false });
 
     /** Tell every button to re-read its engine. Never throws into a caller. */
     function publishEngines() {
@@ -71,10 +79,11 @@ window.__ModuleLoader__.load({
       const busy = record.busy === true;
       const running = record.running === true;
       const ready = record.ready === true;
+      const cooling = record.cooling === true;
       const previous = record.snapshot;
-      if (previous === undefined
-        || previous.busy !== busy || previous.running !== running || previous.ready !== ready) {
-        record.snapshot = { available: true, busy, running, ready };
+      if (previous === undefined || previous.busy !== busy || previous.running !== running
+        || previous.ready !== ready || previous.cooling !== cooling) {
+        record.snapshot = { available: true, busy, cooling, running, ready };
       }
       return record.snapshot;
     }
@@ -702,6 +711,27 @@ window.__ModuleLoader__.load({
       // read the state from before either of them ran.
       const [busy, setBusy] = React.useState(false);
       const busyRef = React.useRef(false);
+      // Set for MANUAL_COOLDOWN_MS after a manual prediction finishes, so a fast
+      // answer followed by another click cannot pay for a second call. The ref is
+      // the guard `generate` reads (it must not wait for a render); the state is
+      // what the button renders so the cooldown is visible, not silent.
+      const [cooling, setCooling] = React.useState(false);
+      const coolingRef = React.useRef(false);
+      const coolTimerRef = React.useRef(0);
+      // Bumped by the publish effect's own bounded retry, so a conversation
+      // window that trails `running` still flips the button to enabled once the
+      // answer lands (see that effect below).
+      const [engineTick, setEngineTick] = React.useState(0);
+      // Bounded retry counter for that same re-read, matching `generate`'s own
+      // "the event window may trail a frame" budget.
+      const engineRetryRef = React.useRef(0);
+      // The record published to the manual trigger. One object per mounted
+      // overlay, mutated in place; `manualRequestRef` keeps its `request` pointing
+      // at the current closure without rebuilding the record.
+      const engineRecordRef = React.useRef(null);
+      // Reassigned every render so the button's `request` always reaches the
+      // latest `generate` closure rather than the one from the first render.
+      const manualRequestRef = React.useRef(() => {});
 
       draftRef.current = typeof draft === 'string' ? draft : '';
       phaseRef.current = phase;
@@ -860,9 +890,11 @@ window.__ModuleLoader__.load({
       const generate = async (force = false) => {
         if (!mountedRef.current) return;
         // A manual click while one is already running would spend a second call
-        // for the same answer. The scheduled path is allowed to supersede work,
-        // which is why the guard is limited to `force`.
-        if (force && busyRef.current) return;
+        // for the same answer, and one inside the cooldown would too: `busyRef`
+        // only spans the request itself, which can return in a fraction of a
+        // second. The scheduled path is exempt because it is driven by turn ends,
+        // not by a finger.
+        if (force && (busyRef.current || coolingRef.current)) return;
         if (draftRef.current !== '' || runningRef.current || phaseRef.current !== 'plain') return;
         const sessions = ctx.get('sessions');
         const session = sessionRef.current;
@@ -946,8 +978,31 @@ window.__ModuleLoader__.load({
           if (seq === requestSeqRef.current) {
             busyRef.current = false;
             setBusy(false);
+            // A manual prediction buys a short cooldown, then the button comes
+            // back on its own. The timer is owned by this component so a Session
+            // switch or unmount cancels it with the rest of the cleanup.
+            if (force) {
+              coolingRef.current = true;
+              setCooling(true);
+              window.clearTimeout(coolTimerRef.current);
+              coolTimerRef.current = window.setTimeout(() => {
+                coolTimerRef.current = 0;
+                coolingRef.current = false;
+                setCooling(false);
+              }, MANUAL_COOLDOWN_MS);
+            }
           }
         }
+      };
+
+      // The manual trigger's entry point. Assigned on every render (not in an
+      // effect) so a click always lands in the newest closure with the current
+      // refs, and publishing the record never has to be rebuilt for it.
+      manualRequestRef.current = () => {
+        // A pending scheduled prediction would double up with this one.
+        clearTimer();
+        attemptsRef.current = 0;
+        void generate(true);
       };
 
       const schedule = (delay) => {
@@ -974,24 +1029,53 @@ window.__ModuleLoader__.load({
         const conversation = readConversation(sessions, session, maxRef.current);
         const last = conversation.messages[conversation.messages.length - 1];
         const ready = conversation.model !== null && last !== undefined && last.role === 'assistant';
-        const record = {
-          busy,
-          running,
-          ready,
-          request: () => {
-            // A pending scheduled prediction would double up with this one.
-            clearTimer();
-            attemptsRef.current = 0;
-            void generate(true);
-          },
-        };
+        // One stable record per Session, mutated in place. The button holds the
+        // published snapshot; replacing the record object on every re-read would
+        // make the map briefly miss between two runs of this effect.
+        let record = engineRecordRef.current;
+        if (record === null) {
+          record = {
+            busy: false,
+            cooling: false,
+            running: false,
+            ready: false,
+            request: () => manualRequestRef.current(),
+          };
+          engineRecordRef.current = record;
+        }
+        record.busy = busy;
+        record.cooling = cooling;
+        record.running = running;
+        record.ready = ready;
         engines.set(session, record);
         publishEngines();
+        // The event window can trail `running` by a frame or two, exactly like the
+        // trigger path `generate` retries for. Without this the button would stay
+        // disabled after an answer until some unrelated state changed. Bounded to
+        // six scans (about 1.2 s), and only while the composer has no settled
+        // answer: an already-ready answer or a running turn stops it at once.
+        if (!ready && !running && engineRetryRef.current < 6) {
+          engineRetryRef.current += 1;
+          const timer = window.setTimeout(() => setEngineTick((value) => value + 1), 200);
+          return () => window.clearTimeout(timer);
+        }
+        // A running turn or a ready answer both end the retry budget, so the next
+        // turn starts its own window instead of inheriting an exhausted one.
+        engineRetryRef.current = 0;
+        return undefined;
+      }, [sessionId, busy, cooling, running, restoreTick, engineTick]);
+
+      // The record leaves the map with the component, not with every re-read:
+      // a Session switch or an unmount is what makes the button unavailable.
+      React.useEffect(() => {
+        const session = sessionId;
+        if (typeof session !== 'string' || session === '') return undefined;
         return () => {
-          if (engines.get(session) === record) engines.delete(session);
+          const record = engineRecordRef.current;
+          if (record !== null && engines.get(session) === record) engines.delete(session);
           publishEngines();
         };
-      }, [sessionId, busy, running, restoreTick]);
+      }, [sessionId]);
 
       // Read the Max mode switches once per mount. Packing happens here, so the
       // Host's values have to reach this half; a failed read keeps `null`, and
@@ -1140,6 +1224,12 @@ window.__ModuleLoader__.load({
         return () => {
           mountedRef.current = false;
           cancelPending();
+          // The cooldown outlives a single request, so its timer needs its own
+          // cleanup: a Session switch must not fire setState into an unmounted
+          // tree, and the next Session must not inherit the previous cooldown.
+          window.clearTimeout(coolTimerRef.current);
+          coolTimerRef.current = 0;
+          coolingRef.current = false;
         };
       }, [sessionId]);
 
@@ -1605,21 +1695,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The manual trigger in the composer's tool row, left of the attach button.
+     * The manual trigger for the prediction of the answer on screen.
      *
      * It renders one compact icon button and asks whichever prediction engine is
      * mounted for this Session to produce a fresh suggestion. It never writes to
      * the draft and never submits: the ghost it produces is still accepted with
      * Tab, exactly like the automatic one. The button keeps its own state so a
-     * double click cannot spend two calls, and it lives in a different slot from
-     * the overlay, so it degrades to "disabled" when no engine is mounted.
+     * repeat click cannot spend a second call, and it lives in a different slot
+     * from the overlay, so it degrades to "disabled" when no engine is mounted.
+     *
+     * The host lays the composer tool row out itself: its own `+`, then the mode
+     * chips, then the `conversation.input.left` list this entry joins. `order`
+     * sorts within that list only, so the button lands after the mode chips and
+     * before the model selector — it cannot be placed before the host's `+`.
      * @param {any} ctx
      */
     function createPredictButton(ctx) {
-      // The same neutral shape other composer tool-row controls use: a quiet
-      // 28px hit target that only gains a surface on hover. The host's own `+`
-      // is a filled circle, so a second filled circle here would read as a
-      // duplicate of it.
+      // A quiet 28px control, but not an invisible one: the other tool-row
+      // controls are either filled (the host's `+`) or labelled chips, so a bare
+      // icon was too easy to miss. A hairline outline plus a transparent surface
+      // reads as "one more control here" without competing with the `+`.
       const BUTTON = {
         display: 'inline-flex',
         alignItems: 'center',
@@ -1628,7 +1723,8 @@ window.__ModuleLoader__.load({
         width: 28,
         height: 28,
         padding: 0,
-        border: 0,
+        boxSizing: 'border-box',
+        border: '1px solid var(--dsw-alias-border-l2)',
         borderRadius: 7,
         background: 'transparent',
         color: 'var(--dsw-alias-label-secondary)',
@@ -1639,8 +1735,9 @@ window.__ModuleLoader__.load({
       // the one button carries its own small sheet rather than a plugin-wide
       // class. Every token is an alias, so light/dark switching needs no work.
       const BUTTON_CSS = `
-[data-dsh-next-input-trigger]{transition:background .12s ease}
-[data-dsh-next-input-trigger]:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
+[data-dsh-next-input-trigger]{transition:background .12s ease,border-color .12s ease,color .12s ease}
+[data-dsh-next-input-trigger]:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l3);color:var(--dsw-alias-label-primary)}
+[data-dsh-next-input-trigger]:active:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}
 [data-dsh-next-input-trigger]:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 [data-dsh-next-input-trigger][aria-busy="true"] svg{animation:dsh-next-input-pulse 1.1s ease-in-out infinite}
 @keyframes dsh-next-input-pulse{0%,100%{opacity:.4}50%{opacity:1}}
@@ -1680,14 +1777,15 @@ window.__ModuleLoader__.load({
         const mounted = engine.available === true;
         const writable = draft === '' && phase === 'plain';
         const ready = mounted && engine.ready === true && engine.running !== true && writable;
-        const disabled = !ready || engine.busy === true;
+        const disabled = !ready || engine.busy === true || engine.cooling === true;
         const label = !mounted
           ? t('predictUnavailable')
           : engine.running === true ? t('predictRunning')
             : engine.ready !== true ? t('predictNotReady')
               : !writable ? t('predictComposerBusy')
-                : engine.busy === true ? t('predictPending')
-                  : t('predictManual');
+                : engine.cooling === true ? t('predictCooling')
+                  : engine.busy === true ? t('predictPending')
+                    : t('predictManual');
 
         return h(React.Fragment, null,
           h('style', { key: 'style' }, BUTTON_CSS),
@@ -2416,6 +2514,7 @@ window.__ModuleLoader__.load({
         announceEnter: '有可用的下一步输入预测，按 Tab 采纳，或按 Enter 采纳并发送。',
         predictManual: '预测下一句话',
         predictPending: '正在预测…',
+        predictCooling: '刚预测过，稍等一秒再点',
         predictRunning: 'AI 正在回答，等它结束后再预测',
         predictNotReady: '还没有可预测的回答：先等 AI 答完',
         predictComposerBusy: '先清空输入框，等它回到可编辑状态',
@@ -2500,6 +2599,7 @@ window.__ModuleLoader__.load({
         announceEnter: 'A next-input prediction is available. Press Tab to accept, or Enter to accept and send.',
         predictManual: 'Predict the next message',
         predictPending: 'Predicting…',
+        predictCooling: 'Just predicted; wait a second before asking again',
         predictRunning: 'The assistant is still answering; predict after it settles',
         predictNotReady: 'No settled answer to predict yet: wait for the answer',
         predictComposerBusy: 'Empty the composer and wait until it is editable',
@@ -2636,12 +2736,12 @@ window.__ModuleLoader__.load({
           order: 6,
         }, createComposerNextInput(ctx)));
 
-        // The manual trigger shares the composer tool row with the attach button,
-        // the mode chips, and the model selector. `conversation.input.left` is the
-        // host's left-hand control list, so the button sits at the start of that
-        // row; `order: 20` keeps it after the host's own `+` and mode chips rather
-        // than before them, and the row hides it automatically while a toolbar
-        // activity such as voice input is expanded.
+        // The manual trigger joins the composer tool row next to the attach
+        // control, the mode chips, and the model selector. The host renders its
+        // own `+` and mode chips before this list, so `conversation.input.left`
+        // puts the button after them and before the model selector; `order: 20`
+        // only orders the entries inside this list. The row hides it
+        // automatically while a toolbar activity such as voice input expands.
         ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
           name: 'conversation.input.left',
           id: 'next-input-trigger',

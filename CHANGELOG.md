@@ -2,9 +2,11 @@
 
 ## 1.1.0
 
-- **A manual prediction trigger in the composer tool row.** A small icon button now sits in the row that holds the attach control, the mode chips, and the model selector, and asks for a fresh prediction of the answer on screen. It produces the same ghost text as the automatic prediction, so accepting it is still `Tab`; it never writes to the draft and never sends. Use it when no prediction appeared, when `Esc` dismissed one, or when you want a different suggestion for the same answer.
-- The button is disabled whenever a prediction cannot land: no settled answer yet, the assistant is still running, a draft is present, the composer is mid-submission, or a call is already in flight (with a pulsing icon). Its tooltip states which of those applies.
-- A manual click bypasses only the page-local "this answer was already predicted" guards. The Host's one-call-per-answer-in-flight refusal, the cache, and the superseded-response guard all still apply, and a second click while a call is running is dropped before it reaches the network.
+- **A manual prediction trigger in the composer tool row.** A small outlined icon button now sits next to the attach control, the mode chips, and the model selector, and asks for a fresh prediction of the answer on screen. It produces the same ghost text as the automatic prediction, so accepting it is still `Tab`; it never writes to the draft and never sends. Use it when no prediction appeared, when `Esc` dismissed one, or when you want a different suggestion for the same answer.
+- The button carries a hairline outline rather than a bare glyph: the other tool-row controls are either filled or labelled, and a transparent icon was too easy to overlook.
+- The button is disabled whenever a prediction cannot land: no settled answer yet, the assistant is still running, a draft is present, the composer is mid-submission, a call is already in flight (with a pulsing icon), or one second after a finished manual prediction. Its tooltip states which of those applies.
+- A manual click bypasses only the page-local "this answer was already predicted" guards. The Host's one-call-per-answer-in-flight refusal, the cache, and the superseded-response guard all still apply. The `busy` flag spans the request and a one-second cooldown spans the gap after it, so neither a double click nor a fast answer followed by another click pays for a second call.
+- The button's readiness is re-read after an answer settles instead of waiting for the next turn to change unrelated state, so it does not stay grey once there is something to predict.
 
 ## 1.0.1
 
@@ -14,8 +16,10 @@
 
 ## 1.0.0
 
-- **First stable release, and the end of new features.** The prediction overlay
-  is feature-frozen: from here on this plugin gets fixes only.
+- **First stable release, marking the feature set of that moment.** Everything
+  below had settled, so this release froze the prediction behaviour as it stood;
+  it was never a promise to add nothing afterwards. Later releases may still add
+  features.
 - Where 0.x arrived at that: a `Tab`-to-accept ghost prediction for the next
   composer message, written by the model selected in the conversation and
   cached on the Host per `sessionId + answerKey`, so switching Sessions,

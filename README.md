@@ -103,14 +103,14 @@ The bundle has no package dependencies. After installation, the plugin row
 The prediction is only preview text. In accept-only mode nothing is submitted
 until you press send.
 
-**Manual trigger.** A small icon button at the left of the composer tool row
-(the line holding the attach control, the mode chips, and the model selector)
-predicts the answer on screen again. It produces the same ghost text, still
-accepted with `Tab` — it never writes to the draft and never sends. Reach for it
-when no prediction appeared, when `Esc` dismissed one, or when you want a
-different wording. The button is disabled, with a tooltip saying why, when there
-is no settled answer yet, while the assistant is still answering, when a draft
-is present or the composer is submitting, or while a prediction is in flight.
+**Manual trigger.** A small outlined icon button in the composer tool row — after
+the mode chips, before the model selector — predicts the answer on screen again.
+It produces the same ghost text, still accepted with `Tab` — it never writes to
+the draft and never sends. Reach for it when no prediction appeared, when `Esc`
+dismissed one, or when you want a different wording. The button is disabled, with
+a tooltip saying why, when there is no settled answer yet, while the assistant is
+still answering, when a draft is present or the composer is submitting, while a
+prediction is in flight, and for one second after a click.
 
 ## Settings
 
