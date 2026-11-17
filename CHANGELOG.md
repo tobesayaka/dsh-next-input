@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2
+
+- **A prediction longer than the composer can be scrolled again.** Past the input box's 14-line cap the ghost was clipped and a scrollbar appeared, but every attempt to scroll — wheel, trackpad, or dragging the bar — snapped straight back to the top. The room reserved for the prediction was keyed on the ghost's measured position, which changes on every scroll tick, so each scroll tore the reservation down and rebuilt it; the teardown collapsed the content for one layout pass, and the browser reset the scroll offset to zero. The reservation now tracks only whether the ghost is placed and is never removed between two identical measurements, so the scroll position holds and the last line stays reachable.
+- **Clicking the prediction no longer loses the caret.** The room used to be reserved on the element that wraps the editor, which left a dead band under the first line: a click there landed on the wrapper, and the composer's own mouse-down handler ignores everything inside the scrollport, so focus fell to the card and the caret disappeared — only a click on the first empty line brought it back. The room now grows the editable surface itself, exactly like a typed draft does, so a click anywhere over the prediction returns the caret to the composer.
+- A prediction shorter than the composer no longer shrinks it: nothing is reserved below the editable surface's natural height.
+- Giving the room back now removes only the `min-height` this plugin added. The whole `style` attribute is left alone, because the editable surface also carries the editor's own inline styles.
+
 ## 1.1.1
 
 - **The Max mode settings are hidden while the master switch is off.** They used to render everywhere, disabled and half-transparent, which made the settings page long and read as broken rather than "not currently in force". With Max mode off the section now shows only its master switch; turning it on brings the seven sub-switches and four budgets back.

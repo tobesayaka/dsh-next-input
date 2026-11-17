@@ -1464,11 +1464,17 @@ window.__ModuleLoader__.load({
 
       // A wrapped prediction must not cover the tool row: let the composer grow
       // under it like it grows under a typed draft. The room is reserved on the
-      // element that wraps the editor, so the scrollport grows with it and the
-      // card's own layout hooks follow. Past the composer's height cap the
-      // scrollport stops growing and clips, and the ghost is painted inside that
-      // clip box (see `ghost` below), so a long prediction scrolls in the box
-      // instead of painting over the tool row and the status line.
+      // editable surface itself, so the scrollport grows with it and the card's
+      // own layout hooks follow. Past the composer's height cap the scrollport
+      // stops growing and clips, and the ghost is painted inside that clip box
+      // (see `ghost` below), so a long prediction scrolls in the box instead of
+      // painting over the tool row and the status line.
+      //
+      // The dependency is `box !== null`, not `box`: `measure()` below replaces
+      // the box on every scroll tick, and keying on its identity tore the room
+      // down and rebuilt it on each one. The teardown shrank the scrollport for
+      // a layout pass, so the browser clamped `scrollTop` back to 0 and a long
+      // prediction could not be scrolled at all.
       React.useLayoutEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId || box === null
           || draft !== '' || phase !== 'plain') {
@@ -1479,11 +1485,15 @@ window.__ModuleLoader__.load({
         const ghost = root === null ? null : root.querySelector('[data-dsh-next-input-ghost]');
         const editor = findEditor(card);
         if (card === null || ghost === null || editor === null) return undefined;
-        const scrollport = editor.closest('[data-input-scroll]');
-        // The scrollport's content wrapper is the element whose height becomes
-        // the composer's height; growing it is what a typed draft does.
-        const host = (scrollport === null ? null : scrollport.firstElementChild)
-          ?? (editor.parentElement === null ? editor : editor.parentElement);
+        // Grow the editable surface, exactly like a typed draft grows it. Doing
+        // this on the scrollport's wrapper left a dead band under the last text
+        // line: clicks there hit the wrapper, and the host's card handler skips
+        // everything inside the scrollport, so the caret was lost until a click
+        // landed on the first line again.
+        const host = editor;
+        // Height with no reservation applied: a prediction shorter than the
+        // composer must never shrink it.
+        const floor = Math.ceil(host.getBoundingClientRect().height);
 
         let applied = 0;
         let frame = 0;
@@ -1491,8 +1501,9 @@ window.__ModuleLoader__.load({
         const clear = () => {
           if (applied === 0) return;
           applied = 0;
+          // Only this property: the editor also carries Lexical's own inline
+          // styles and a React-managed style prop, so the attribute stays.
           host.style.removeProperty('min-height');
-          if (host.style.length === 0) host.removeAttribute('style');
         };
         const measure = () => {
           frame = 0;
@@ -1512,8 +1523,10 @@ window.__ModuleLoader__.load({
               + (Number.parseFloat(window.getComputedStyle(editor).paddingTop) || 0);
           const next = Math.ceil(base + ghost.getBoundingClientRect().height);
           if (next === applied) return;
-          clear();
-          if (next <= 0) return;
+          // Assign in place. Removing the property first collapses the content
+          // for one layout pass, and the browser clamps the scrollport's
+          // scrollTop to 0 when that happens.
+          if (next <= floor) { clear(); return; }
           applied = next;
           host.style.setProperty('min-height', next + 'px');
         };
@@ -1531,7 +1544,7 @@ window.__ModuleLoader__.load({
           if (frame !== 0) window.cancelAnimationFrame(frame);
           clear();
         };
-      }, [suggestion, box, draft, phase, sessionId]);
+      }, [suggestion, box !== null, draft, phase, sessionId]);
 
       React.useEffect(() => {
         if (suggestion === null || suggestion.sessionId !== sessionId
